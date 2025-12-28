@@ -7,10 +7,10 @@ import (
 )
 
 type Item struct {
-	ID        string `json:"id"`
+	ID        string `json:"id" gorm:"primaryKey"`
 	Content   string `json:"content"`
 	IsDeleted bool   `json:"is_deleted"`
-	UpdatedAt int64  `json:"updated_at"`
+	UpdatedAt int64  `json:"updated_at" gorm:"autoUpdateTime:false"`
 }
 
 func (i Item) CalculateHash() string {
