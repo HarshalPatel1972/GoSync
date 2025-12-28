@@ -1,0 +1,15 @@
+# Standard Go gitignore
+/bin/
+/dist/
+*.exe
+*.test
+*.prof
+vendor/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Request specific
+*.db
+*.wasm
