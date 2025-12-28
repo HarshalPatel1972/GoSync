@@ -47,9 +47,9 @@ func connectWebSocket() {
 		}
 
 		switch msg.Type {
-		case protocol.MessageTypeSyncNeeded:
-			fmt.Println("Server requested sync. Uploading data...")
-			uploadData(ws)
+		case protocol.MessageTypeRequestSnapshot:
+			fmt.Println("Server requested snapshot. Sending Snapshot...")
+			sendSnapshot(ws)
 		case protocol.MessageTypeHashCheck:
 			var serverState protocol.SyncState
 			json.Unmarshal([]byte(msg.Payload), &serverState)
@@ -69,21 +69,21 @@ func connectWebSocket() {
 	jsWebSocket = ws
 }
 
-func uploadData(ws js.Value) {
+func sendSnapshot(ws js.Value) {
 	items, _ := repo.GetAllItems()
-	syncData := protocol.SyncData{
+	snapshot := protocol.SnapshotPayload{
 		Items: items,
 	}
 	
-	payload, _ := json.Marshal(syncData)
+	payload, _ := json.Marshal(snapshot)
 	msg := protocol.Message{
-		Type:    protocol.MessageTypeSyncUpload,
+		Type:    protocol.MessageTypeSnapshotData,
 		Payload: string(payload),
 	}
 
 	jsonMsg, _ := json.Marshal(msg)
 	ws.Call("send", string(jsonMsg))
-	fmt.Printf("Uploaded %d items to server\n", len(items))
+	fmt.Printf("Sent Snapshot with %d items\n", len(items))
 }
 
 func sendHashCheck(ws js.Value) {

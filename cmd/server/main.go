@@ -48,8 +48,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 		if msg.Type == protocol.MessageTypeHashCheck {
 			handleHashCheck(ws, msg)
-		} else if msg.Type == protocol.MessageTypeSyncUpload {
-			handleSyncUpload(ws, msg)
+		} else if msg.Type == protocol.MessageTypeSnapshotData {
+			handleSnapshotData(ws, msg)
 		}
 	}
 }
@@ -69,10 +69,10 @@ func handleHashCheck(ws *websocket.Conn, msg protocol.Message) {
 	fmt.Printf("Use Hash: %s | Server Hash: %s\n", clientState.RootHash, serverHash)
 
 	if clientState.RootHash != serverHash {
-		fmt.Println("Sync needed")
-		// Request Sync
+		fmt.Println("Hash mismatch! Requesting Snapshot...")
+		// Request Snapshot
 		request := protocol.Message{
-			Type: protocol.MessageTypeSyncNeeded,
+			Type: protocol.MessageTypeRequestSnapshot,
 		}
 		ws.WriteJSON(request)
 	} else {
@@ -80,28 +80,28 @@ func handleHashCheck(ws *websocket.Conn, msg protocol.Message) {
 	}
 }
 
-func handleSyncUpload(ws *websocket.Conn, msg protocol.Message) {
-	var syncData protocol.SyncData
-	err := json.Unmarshal([]byte(msg.Payload), &syncData)
+func handleSnapshotData(ws *websocket.Conn, msg protocol.Message) {
+	var snapshot protocol.SnapshotPayload
+	err := json.Unmarshal([]byte(msg.Payload), &snapshot)
 	if err != nil {
-		log.Printf("Error unmarshalling sync upload: %v", err)
+		log.Printf("Error unmarshalling snapshot data: %v", err)
 		return
 	}
 
-	fmt.Printf("Receiving %d items...\n", len(syncData.Items))
+	fmt.Printf("Received %d items.\n", len(snapshot.Items))
 
-	for _, item := range syncData.Items {
+	for _, item := range snapshot.Items {
 		repo.PutItem(item)
 	}
 
 	// Recalculate hash and confirm sync
 	newHash, _ := repo.GetStateHash()
-	fmt.Printf("Sync complete. New Server Hash: %s\n", newHash)
+	fmt.Printf("Synced! New Hash: %s\n", newHash)
 
 	// Send back HASH_CHECK to confirm to client
 	state := protocol.SyncState{
 		RootHash: newHash,
-		Count:    len(syncData.Items), // Approximate/unused by client for now
+		Count:    len(snapshot.Items),
 	}
 	payload, _ := json.Marshal(state)
 	

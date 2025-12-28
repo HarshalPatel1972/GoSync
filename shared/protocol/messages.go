@@ -8,10 +8,9 @@ type Message struct {
 }
 
 const (
-	MessageTypeHashCheck  = "HASH_CHECK"
-	MessageTypeSyncData   = "SYNC_DATA"
-	MessageTypeSyncNeeded = "SYNC_NEEDED"
-	MessageTypeSyncUpload = "SYNC_UPLOAD"
+	MessageTypeHashCheck      = "HASH_CHECK"
+	MessageTypeRequestSnapshot = "REQUEST_SNAPSHOT"
+	MessageTypeSnapshotData    = "SNAPSHOT_DATA"
 )
 
 type SyncState struct {
@@ -19,7 +18,7 @@ type SyncState struct {
 	Count    int    `json:"count"`
 }
 
-type SyncData struct {
+type SnapshotPayload struct {
 	Items []models.Item `json:"items"`
 }
 
