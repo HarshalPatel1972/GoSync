@@ -20,15 +20,15 @@ var upgrader = websocket.Upgrader{
 var repo repository.Repository // Use the interface type
 
 func main() {
-	// Database connection string
-	dsn := "host=localhost user=postgres password=postgres dbname=gosync port=5432 sslmode=disable"
+	// SQLite database file
+	dbFile := "server.db"
 	
 	var err error
-	repo, err = repository.NewPostgresRepository(dsn)
+	repo, err = repository.NewSQLiteRepository(dbFile)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	fmt.Println("Connected to Postgres")
+	fmt.Println("Connected to SQLite")
 
 	http.HandleFunc("/ws", handleConnections)
 
