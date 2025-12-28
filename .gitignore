@@ -1,7 +1,8 @@
 # Standard Go gitignore
 /bin/
-/dist/
+# /dist/
 *.exe
+
 *.test
 *.prof
 vendor/

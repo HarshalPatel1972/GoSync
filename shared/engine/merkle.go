@@ -3,7 +3,7 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+
 	"sort"
 	"strings"
 
