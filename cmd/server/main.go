@@ -48,6 +48,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 		if msg.Type == protocol.MessageTypeHashCheck {
 			handleHashCheck(ws, msg)
+		} else if msg.Type == protocol.MessageTypeSyncUpload {
+			handleSyncUpload(ws, msg)
 		}
 	}
 }
@@ -68,7 +70,44 @@ func handleHashCheck(ws *websocket.Conn, msg protocol.Message) {
 
 	if clientState.RootHash != serverHash {
 		fmt.Println("Sync needed")
+		// Request Sync
+		request := protocol.Message{
+			Type: protocol.MessageTypeSyncNeeded,
+		}
+		ws.WriteJSON(request)
 	} else {
 		fmt.Println("In Sync")
 	}
+}
+
+func handleSyncUpload(ws *websocket.Conn, msg protocol.Message) {
+	var syncData protocol.SyncData
+	err := json.Unmarshal([]byte(msg.Payload), &syncData)
+	if err != nil {
+		log.Printf("Error unmarshalling sync upload: %v", err)
+		return
+	}
+
+	fmt.Printf("Receiving %d items...\n", len(syncData.Items))
+
+	for _, item := range syncData.Items {
+		repo.PutItem(item)
+	}
+
+	// Recalculate hash and confirm sync
+	newHash, _ := repo.GetStateHash()
+	fmt.Printf("Sync complete. New Server Hash: %s\n", newHash)
+
+	// Send back HASH_CHECK to confirm to client
+	state := protocol.SyncState{
+		RootHash: newHash,
+		Count:    len(syncData.Items), // Approximate/unused by client for now
+	}
+	payload, _ := json.Marshal(state)
+	
+	response := protocol.Message{
+		Type:    protocol.MessageTypeHashCheck,
+		Payload: string(payload),
+	}
+	ws.WriteJSON(response)
 }

@@ -6,8 +6,6 @@ import (
 	"syscall/js"
 	"time"
 
-	"github.com/HarshalPatel1972/GoSync/shared/protocol"
-
 	"github.com/HarshalPatel1972/GoSync/shared/models"
 	"github.com/HarshalPatel1972/GoSync/shared/protocol"
 	"github.com/HarshalPatel1972/GoSync/shared/repository"
@@ -39,12 +37,53 @@ func connectWebSocket() {
 
 	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		event := args[0]
-		data := event.Get("data").String()
-		fmt.Printf("Received message: %s\n", data)
+		dataStr := event.Get("data").String()
+		
+		var msg protocol.Message
+		err := json.Unmarshal([]byte(dataStr), &msg)
+		if err != nil {
+			fmt.Println("Error unmarshalling message:", err)
+			return nil
+		}
+
+		switch msg.Type {
+		case protocol.MessageTypeSyncNeeded:
+			fmt.Println("Server requested sync. Uploading data...")
+			uploadData(ws)
+		case protocol.MessageTypeHashCheck:
+			var serverState protocol.SyncState
+			json.Unmarshal([]byte(msg.Payload), &serverState)
+			localHash, _ := repo.GetStateHash()
+			if serverState.RootHash == localHash {
+				fmt.Println("SYNCED! Server matches local state.")
+			} else {
+				fmt.Println("Server hash mismatch:", serverState.RootHash)
+			}
+		default:
+			fmt.Printf("Received unknown message type: %s\n", msg.Type)
+		}
+
 		return nil
 	}))
 
 	jsWebSocket = ws
+}
+
+func uploadData(ws js.Value) {
+	items, _ := repo.GetAllItems()
+	syncData := protocol.SyncData{
+		Items: items,
+	}
+	
+	payload, _ := json.Marshal(syncData)
+	msg := protocol.Message{
+		Type:    protocol.MessageTypeSyncUpload,
+		Payload: string(payload),
+	}
+
+	jsonMsg, _ := json.Marshal(msg)
+	ws.Call("send", string(jsonMsg))
+	fmt.Printf("Uploaded %d items to server\n", len(items))
 }
 
 func sendHashCheck(ws js.Value) {
