@@ -1,15 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"syscall/js"
 	"time"
 
+	"github.com/HarshalPatel1972/GoSync/shared/protocol"
+
 	"github.com/HarshalPatel1972/GoSync/shared/models"
+	"github.com/HarshalPatel1972/GoSync/shared/protocol"
 	"github.com/HarshalPatel1972/GoSync/shared/repository"
 )
 
 var repo *repository.MemoryRepository
+var jsWebSocket js.Value
 
 func main() {
 	fmt.Println("GoSync WASM initialized")
@@ -17,7 +22,49 @@ func main() {
 
 	js.Global().Set("addItemToStore", js.FuncOf(addItemToStore))
 
+	// Connect to WebSocket
+	connectWebSocket()
+
 	select {} // Keep the Go program running
+}
+
+func connectWebSocket() {
+	ws := js.Global().Get("WebSocket").New("ws://localhost:8080/ws")
+
+	ws.Set("onopen", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		fmt.Println("WebSocket connection opened")
+		sendHashCheck(ws)
+		return nil
+	}))
+
+	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		event := args[0]
+		data := event.Get("data").String()
+		fmt.Printf("Received message: %s\n", data)
+		return nil
+	}))
+
+	jsWebSocket = ws
+}
+
+func sendHashCheck(ws js.Value) {
+	hash, _ := repo.GetStateHash()
+	items, _ := repo.GetAllItems()
+
+	state := protocol.SyncState{
+		RootHash: hash,
+		Count:    len(items),
+	}
+
+	payload, _ := json.Marshal(state)
+	msg := protocol.Message{
+		Type:    protocol.MessageTypeHashCheck,
+		Payload: string(payload),
+	}
+
+	jsonMsg, _ := json.Marshal(msg)
+	ws.Call("send", string(jsonMsg))
+	fmt.Printf("Sent HASH_CHECK: %s\n", hash)
 }
 
 func addItemToStore(this js.Value, args []js.Value) interface{} {
@@ -42,7 +89,10 @@ func addItemToStore(this js.Value, args []js.Value) interface{} {
 		return nil
 	}
 
-	hash, _ := repo.GetStateHash()
-	fmt.Printf("Item added. New State Hash: %s\n", hash)
+	// Trigger hash check after adding item
+	if !jsWebSocket.IsUndefined() {
+		sendHashCheck(jsWebSocket)
+	}
+
 	return nil
 }
