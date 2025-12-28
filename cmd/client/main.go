@@ -11,12 +11,13 @@ import (
 	"github.com/HarshalPatel1972/GoSync/shared/repository"
 )
 
-var repo *repository.MemoryRepository
+var repo repository.Repository
 var jsWebSocket js.Value
 
 func main() {
 	fmt.Println("GoSync WASM initialized")
-	repo = repository.NewMemoryRepository()
+	// Use BrowserRepository (LocalStorage/IndexedDB) instead of Memory
+	repo = NewBrowserRepository()
 
 	js.Global().Set("addItemToStore", js.FuncOf(addItemToStore))
 

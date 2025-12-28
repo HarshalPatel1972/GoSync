@@ -17,10 +17,18 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-var repo *repository.MemoryRepository
+var repo repository.Repository // Use the interface type
 
 func main() {
-	repo = repository.NewMemoryRepository()
+	// Database connection string
+	dsn := "host=localhost user=postgres password=postgres dbname=gosync port=5432 sslmode=disable"
+	
+	var err error
+	repo, err = repository.NewPostgresRepository(dsn)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	fmt.Println("Connected to Postgres")
 
 	http.HandleFunc("/ws", handleConnections)
 
