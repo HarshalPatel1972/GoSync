@@ -26,6 +26,23 @@ It is a **Protocol**, not a Platform.
 - **Communication**: WebSockets (Real-time).
 - **Storage**: `syscall/js` Bridge to Browser APIs.
 
+## 📦 Installation
+```bash
+# Install the Client SDK directly from GitHub
+npm install github:HarshalPatel1972/GoSync#main --workspace=sdk/js
+```
+
+## 🎮 Try it instantly
+We included a "Kitchen Sink" demo.
+
+**Windows:**
+Double-click `run_demo.bat`
+
+**Mac/Linux:**
+```bash
+./run_demo.sh
+```
+
 ## ⚡ Quick Start
 
 ### 1. Build the Server

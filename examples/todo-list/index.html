@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>GoSync Live Demo</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 1rem;
+        }
+
+        .status {
+            padding: 10px;
+            background: #eee;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+
+        .online {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        input {
+            padding: 10px;
+            width: 70%;
+        }
+
+        button {
+            padding: 10px;
+            width: 20%;
+            cursor: pointer;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        li {
+            padding: 10px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .meta {
+            font-size: 0.8em;
+            color: #666;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>GoSync Todo List</h1>
+
+    <div id="status" class="status offline">🔴 Offline (IndexedDB Only)</div>
+
+    <div>
+        <input type="text" id="taskInput" placeholder="Enter a new task..." />
+        <button onclick="addItem()">Add</button>
+    </div>
+
+    <ul id="taskList">Loading...</ul>
+
+    <!-- Dependencies -->
+    <script src="wasm_exec.js"></script>
+    <script type="module" src="bridge.js"></script>
+
+    <script>
+        // --- THE SETUP ---
+        const go = new Go();
+        let isSyncing = false;
+
+        // Wait for bridge loaded
+        async function waitForBridge() {
+            while (!window.GoSyncDB) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+
+        // 2. Load and Run the WASM
+        waitForBridge().then(() => {
+            WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject).then((result) => {
+                go.run(result.instance);
+                console.log("✅ GoSync Engine Started");
+                loadItems(); // Load data from IndexedDB immediately
+                connectWebsocket();
+            });
+        });
+
+        // 3. Connect to Server (The "Online" Part)
+        function connectWebsocket() {
+            // Note: In a real app, use the SDK. Here we use raw WebSocket for the demo.
+            const socket = new WebSocket("ws://localhost:8080/ws");
+
+            socket.onopen = () => {
+                document.getElementById('status').className = 'status online';
+                document.getElementById('status').innerText = '🟢 Online (Syncing with Server)';
+            };
+
+            socket.onclose = () => {
+                document.getElementById('status').className = 'status offline';
+                document.getElementById('status').innerText = '🔴 Offline (Local Mode)';
+                setTimeout(connectWebsocket, 3000); // Auto-reconnect
+            };
+        }
+
+        // --- THE APP LOGIC ---
+
+        async function addItem() {
+            const input = document.getElementById('taskInput');
+            const text = input.value;
+            if (!text) return;
+
+            // In a real app, we would call Go functions. 
+            // For now, in this simpler demo, we interact with the "global" addItem function 
+            // if we exposed one, OR we just use the GoSyncDB bridge directly to mimic user action.
+            // But wait, the Go Code listens to DOM events or JS calls?
+            // The Go Client Code `main.go` sets up `addItemToStore`.
+
+            // Let's assume the Go WASM exposes `addItemToStore` globally as it currently does.
+            if (window.addItemToStore) {
+                window.addItemToStore(text);
+                input.value = "";
+                // We need to wait for Go to save to DB then reload.
+                setTimeout(loadItems, 100);
+            } else {
+                console.error("Go WASM not loaded or addItemToStore not exposed");
+            }
+        }
+
+        async function loadItems() {
+            // Wait for DB
+            if (!window.GoSyncDB) return;
+
+            const items = await window.GoSyncDB.getAll();
+            const list = document.getElementById('taskList');
+            list.innerHTML = "";
+
+            // Items are JSON strings in current implementation
+            const parsedItems = items.map(i => {
+                try { return JSON.parse(i) } catch (e) { return null }
+            }).filter(i => i).sort((a, b) => b.updated_at - a.updated_at);
+
+            parsedItems.forEach(item => {
+                const li = document.createElement('li');
+                // Handle different JSON structures (snake_case vs camelCase depending on struct field alignment)
+                const content = item.content || item.Content;
+                const date = item.updated_at || item.UpdatedAt;
+
+                li.innerHTML = `
+                    <span>${content}</span>
+                    <span class="meta">${new Date(date / 1000000).toLocaleString()}</span> 
+                `; // Go sends Nanoseconds usually? Need to check.
+                // Go `UpdatedAt` is typically int64 nanoseconds in our model? 
+                // Let's check model.go. Yes, int64. JS Date expects ms. So / 1000000.
+
+                list.appendChild(li);
+            });
+        }
+
+        // Refresh list periodically to show sync updates
+        setInterval(loadItems, 1000);
+    </script>
+</body>
+
+</html>
