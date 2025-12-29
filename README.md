@@ -43,6 +43,15 @@ Double-click `run_demo.bat`
 ./run_demo.sh
 ```
 
+### 🧪 How to Verify (The Magic Trick)
+1.  Open `http://localhost:3000`. Status should be **🟢 Online**.
+2.  Add a task: "Hello World".
+3.  **Kill the Server** (Close the terminal). Status turns **🔴 Offline**.
+4.  Add a task: "I am offline".
+5.  **Refresh the Page**. The tasks are still there! (IndexedDB Persistence).
+6.  **Restart the Server**. Status turns **🟢 Online**.
+7.  Check Server Logs: It will say "Synced!" and have both items.
+
 ## ⚡ Quick Start
 
 ### 1. Build the Server
