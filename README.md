@@ -28,8 +28,7 @@ It is a **Protocol**, not a Platform.
 
 ## 📦 Installation
 ```bash
-# Install the Client SDK directly from GitHub
-npm install github:HarshalPatel1972/GoSync#main --workspace=sdk/js
+npm install @harshalpatel2868/gosync-client
 ```
 
 ## 🎮 Try it instantly
