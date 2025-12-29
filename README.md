@@ -1,5 +1,7 @@
 # GoSync
 
+![Build Status](https://github.com/HarshalPatel1972/GoSync/actions/workflows/ci.yml/badge.svg)
+
 **A relentless, offline-first sync engine for Go.**  
 *Zero dependencies. Instant sync. Full ownership.*
 
@@ -62,6 +64,37 @@ Add items.
 Go offline. 
 Refresh. 
 Synced.
+
+## 💻 Usage Example
+
+How to use GoSync in your own Go application:
+
+```go
+// 1. Define your data
+type Task struct {
+    ID      string
+    Content string
+}
+
+// 2. Initialize the Sync Engine
+repo := gosync.NewBrowserRepo() // Auto-connects to IndexedDB
+engine := gosync.NewEngine(repo)
+
+// 3. Add Data (Works Offline!)
+engine.Add(Task{ID: "1", Content: "Buy Milk"})
+// -> Automatically syncs to server when online
+```
+
+## 🏗 Architecture
+
+```mermaid
+graph TD
+    User[User Action] -->|Add Item| ClientDB[(IndexedDB)]
+    ClientDB -->|Update| Merkle[Merkle Tree]
+    Merkle -->|Hash Mismatch| Sync[Sync Engine]
+    Sync -->|WebSocket| Server[Go Server]
+    Server -->|Persist| SQLite[(SQLite/Postgres)]
+```
 
 ## 📜 License
 
