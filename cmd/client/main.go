@@ -19,12 +19,32 @@ func main() {
 	// Use BrowserRepository (LocalStorage/IndexedDB) instead of Memory
 	repo = NewBrowserRepository()
 
+	// Perform initial load in a goroutine
+	go func() {
+		items, err := repo.GetAllItems()
+		if err != nil {
+			fmt.Println("Error loading items:", err)
+			return
+		}
+		fmt.Printf("Loaded %d items from IndexedDB\n", len(items))
+	}()
+
 	js.Global().Set("addItemToStore", js.FuncOf(addItemToStore))
 
-	// Connect to WebSocket
+	// Connect to WebSocket (also handles async logic internally if needed)
 	connectWebSocket()
 
-	select {} // Keep the Go program running
+	// Keep the Go program running correctly
+	c := make(chan struct{})
+
+    // Use JS to drive the heartbeat. This prevents Go from thinking it's deadlocked,
+    // and prevents the browser from freezing (since Go yields to JS fully).
+    keepAlive := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+        return nil
+    })
+    js.Global().Call("setInterval", keepAlive, 5000) // Wake up every 5s
+
+	<-c
 }
 
 func connectWebSocket() {
@@ -32,38 +52,39 @@ func connectWebSocket() {
 
 	ws.Set("onopen", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		fmt.Println("WebSocket connection opened")
-		sendHashCheck(ws)
+		go sendHashCheck(ws)
 		return nil
 	}))
 
 	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		// Handle message inside goroutine to safely await DB calls
 		event := args[0]
 		dataStr := event.Get("data").String()
-		
-		var msg protocol.Message
-		err := json.Unmarshal([]byte(dataStr), &msg)
-		if err != nil {
-			fmt.Println("Error unmarshalling message:", err)
-			return nil
-		}
-
-		switch msg.Type {
-		case protocol.MessageTypeRequestSnapshot:
-			fmt.Println("Server requested snapshot. Sending Snapshot...")
-			sendSnapshot(ws)
-		case protocol.MessageTypeHashCheck:
-			var serverState protocol.SyncState
-			json.Unmarshal([]byte(msg.Payload), &serverState)
-			localHash, _ := repo.GetStateHash()
-			if serverState.RootHash == localHash {
-				fmt.Println("SYNCED! Server matches local state.")
-			} else {
-				fmt.Println("Server hash mismatch:", serverState.RootHash)
+		go func() {
+			var msg protocol.Message
+			err := json.Unmarshal([]byte(dataStr), &msg)
+			if err != nil {
+				fmt.Println("Error unmarshalling message:", err)
+				return
 			}
-		default:
-			fmt.Printf("Received unknown message type: %s\n", msg.Type)
-		}
 
+			switch msg.Type {
+			case protocol.MessageTypeRequestSnapshot:
+				fmt.Println("Server requested snapshot. Sending Snapshot...")
+				sendSnapshot(ws)
+			case protocol.MessageTypeHashCheck:
+				var serverState protocol.SyncState
+				json.Unmarshal([]byte(msg.Payload), &serverState)
+				localHash, _ := repo.GetStateHash()
+				if serverState.RootHash == localHash {
+					fmt.Println("SYNCED! Server matches local state.")
+				} else {
+					fmt.Println("Server hash mismatch:", serverState.RootHash)
+				}
+			default:
+				fmt.Printf("Received unknown message type: %s\n", msg.Type)
+			}
+		}()
 		return nil
 	}))
 
@@ -114,25 +135,28 @@ func addItemToStore(this js.Value, args []js.Value) interface{} {
 	}
 	content := args[0].String()
 	
-	// Create a new item
-	item := models.Item{
-		// In a real app, use a UUID. Here using timestamp for simplicity in this phase.
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()), 
-		Content:   content,
-		IsDeleted: false,
-		UpdatedAt: time.Now().Unix(),
-	}
+	// Run in goroutine to allow Await (channel block) to work without deadlocking main thread
+	go func() {
+		// Create a new item
+		item := models.Item{
+			// In a real app, use a UUID. Here using timestamp for simplicity in this phase.
+			ID:        fmt.Sprintf("%d", time.Now().UnixNano()), 
+			Content:   content,
+			IsDeleted: false,
+			UpdatedAt: time.Now().Unix(),
+		}
 
-	err := repo.PutItem(item)
-	if err != nil {
-		fmt.Printf("Error adding item: %s\n", err)
-		return nil
-	}
+		err := repo.PutItem(item)
+		if err != nil {
+			fmt.Printf("Error adding item: %s\n", err)
+			return
+		}
 
-	// Trigger hash check after adding item
-	if !jsWebSocket.IsUndefined() {
-		sendHashCheck(jsWebSocket)
-	}
+		// Trigger hash check after adding item
+		if !jsWebSocket.IsUndefined() {
+			sendHashCheck(jsWebSocket)
+		}
+	}()
 
 	return nil
 }
