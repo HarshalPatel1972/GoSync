@@ -36,10 +36,13 @@ npm install github:HarshalPatel1972/GoSync#main --workspace=sdk/js
 We included a "Kitchen Sink" demo.
 
 **Windows:**
-Double-click `run_demo.bat`
+```cmd
+.\run_demo.bat
+```
 
 **Mac/Linux:**
 ```bash
+chmod +x run_demo.sh
 ./run_demo.sh
 ```
 
