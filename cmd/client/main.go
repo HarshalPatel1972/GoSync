@@ -80,7 +80,26 @@ func connectWebSocket() {
 					fmt.Println("SYNCED! Server matches local state.")
 				} else {
 					fmt.Println("Server hash mismatch:", serverState.RootHash)
+					fmt.Println("Requesting snapshot from server...")
+					sendRequestSnapshot(ws)
 				}
+			case protocol.MessageTypeSnapshotData:
+				fmt.Println("Received snapshot from server.")
+				var snapshot protocol.SnapshotPayload
+				json.Unmarshal([]byte(msg.Payload), &snapshot)
+				
+				count := 0
+				for _, item := range snapshot.Items {
+					err := repo.PutItem(item)
+					if err == nil {
+						count++
+					} else {
+						fmt.Printf("Error saving item %s: %v\n", item.ID, err)
+					}
+				}
+				fmt.Printf("Applied %d items from server snapshot.\n", count)
+				// Re-verify sync status
+				go sendHashCheck(ws)
 			default:
 				fmt.Printf("Received unknown message type: %s\n", msg.Type)
 			}
@@ -159,4 +178,13 @@ func addItemToStore(this js.Value, args []js.Value) interface{} {
 	}()
 
 	return nil
+}
+
+func sendRequestSnapshot(ws js.Value) {
+	msg := protocol.Message{
+		Type: protocol.MessageTypeRequestSnapshot,
+	}
+	jsonMsg, _ := json.Marshal(msg)
+	ws.Call("send", string(jsonMsg))
+	fmt.Println("Sent REQUEST_SNAPSHOT")
 }

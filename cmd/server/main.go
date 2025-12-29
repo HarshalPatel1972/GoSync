@@ -58,6 +58,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			handleHashCheck(ws, msg)
 		} else if msg.Type == protocol.MessageTypeSnapshotData {
 			handleSnapshotData(ws, msg)
+		} else if msg.Type == protocol.MessageTypeRequestSnapshot {
+			handleRequestSnapshot(ws)
 		}
 	}
 }
@@ -118,4 +120,26 @@ func handleSnapshotData(ws *websocket.Conn, msg protocol.Message) {
 		Payload: string(payload),
 	}
 	ws.WriteJSON(response)
+}
+
+func handleRequestSnapshot(ws *websocket.Conn) {
+	fmt.Println("Client requested snapshot. Sending all items...")
+	items, err := repo.GetAllItems()
+	if err != nil {
+		log.Printf("Error getting items: %v", err)
+		return
+	}
+
+	snapshot := protocol.SnapshotPayload{
+		Items: items,
+	}
+	payload, _ := json.Marshal(snapshot)
+
+	response := protocol.Message{
+		Type:    protocol.MessageTypeSnapshotData,
+		Payload: string(payload),
+	}
+
+	ws.WriteJSON(response)
+	fmt.Printf("Sent %d items to client.\n", len(items))
 }
