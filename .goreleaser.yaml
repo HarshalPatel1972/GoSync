@@ -7,6 +7,8 @@ builds:
   - id: server
     main: ./cmd/server
     binary: gosync_server
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
       - windows
