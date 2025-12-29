@@ -1,0 +1,30 @@
+name: GoSync CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Build Server
+      run: go build -v ./cmd/server
+
+    - name: Build Client (WASM)
+      env:
+        GOOS: js
+        GOARCH: wasm
+      run: go build -v ./cmd/client
+
+    - name: Test Shared Logic
+      run: go test -v ./shared/...
