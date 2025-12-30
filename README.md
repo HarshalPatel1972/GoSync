@@ -5,6 +5,8 @@
 **A relentless, offline-first sync engine for Go.**  
 *Zero dependencies. Instant sync. Full ownership.*
 
+[🌐 Website](https://gosync-zero.vercel.app) · [📖 Documentation](./PROTOCOL.md) · [📦 NPM Package](https://www.npmjs.com/package/@harshalpatel2868/gosync-client) · [🎨 Website Repo](https://github.com/HarshalPatel1972/gosync-zero)
+
 ---
 
 ## 🚀 Why GoSync?
