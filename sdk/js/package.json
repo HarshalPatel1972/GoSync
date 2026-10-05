@@ -19,7 +19,8 @@
     "gosync.wasm",
     "gosync.wasm.br",
     "gosync.wasm.gz",
-    "wasm_exec.js"
+    "wasm_exec.js",
+    "README.md"
   ],
   "scripts": {
     "build": "node build.mjs",
@@ -49,5 +50,6 @@
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",
     "playwright": "^1.63.0"
-  }
+  },
+  "homepage": "https://github.com/HarshalPatel1972/GoSync#readme"
 }
