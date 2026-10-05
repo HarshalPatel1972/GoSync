@@ -8,6 +8,7 @@
 //
 //	GOSYNC_ADDR              listen address (default ":8080")
 //	GOSYNC_DATABASE_URL      postgres://... URL or SQLite file path (default "gosync.db")
+//	GOSYNC_DB_MAX_CONNS      PostgreSQL pool size per instance (default 25)
 //	GOSYNC_JWT_SECRET        HS256 secret (>= 32 bytes), or
 //	GOSYNC_JWKS_URL          JWKS URL of your identity provider
 //	GOSYNC_JWT_ISSUER        required "iss" claim (optional)
@@ -131,7 +132,11 @@ func run() error {
 	defer stop()
 
 	dsn := env("GOSYNC_DATABASE_URL", "gosync.db")
-	st, err := sqlstore.Open(ctx, dsn)
+	maxConns, err := strconv.Atoi(env("GOSYNC_DB_MAX_CONNS", "25"))
+	if err != nil || maxConns < 1 {
+		return fmt.Errorf("GOSYNC_DB_MAX_CONNS must be a positive integer")
+	}
+	st, err := sqlstore.OpenWith(ctx, dsn, sqlstore.Options{MaxConns: maxConns})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

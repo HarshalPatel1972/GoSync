@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,9 +34,10 @@ type Store struct {
 	dialect dialect
 
 	// SQLite group commit (nil on PostgreSQL).
-	writes chan *pushReq
-	stop   chan struct{}
-	stmts  sync.Map // stmtKey -> *sql.Stmt
+	writes  chan *pushReq
+	stop    chan struct{}
+	stmts   sync.Map // stmtKey -> *sql.Stmt
+	upserts sync.Map // field count -> upsert statement text
 
 	writerDone       chan struct{}
 	checkpointerDone chan struct{}
@@ -53,6 +55,21 @@ func IsPostgres(dsn string) bool {
 // postgres:// or postgresql:// URL selects PostgreSQL; anything else is a
 // SQLite file path (or ":memory:").
 func Open(ctx context.Context, dsn string) (*Store, error) {
+	return OpenWith(ctx, dsn, Options{})
+}
+
+// Options tunes a Store.
+type Options struct {
+	// MaxConns is the PostgreSQL connection pool size per server instance
+	// (default 25). Keep instances × MaxConns below max_connections.
+	MaxConns int
+}
+
+// OpenWith is Open with options.
+func OpenWith(ctx context.Context, dsn string, opts Options) (*Store, error) {
+	if opts.MaxConns <= 0 {
+		opts.MaxConns = 25
+	}
 	s := &Store{}
 	var err error
 	if IsPostgres(dsn) {
@@ -61,7 +78,8 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.db.SetMaxOpenConns(20)
+		s.db.SetMaxOpenConns(opts.MaxConns)
+		s.db.SetMaxIdleConns(opts.MaxConns)
 		s.db.SetConnMaxIdleTime(5 * time.Minute)
 		s.rdb = s.db
 	} else {
@@ -512,13 +530,11 @@ func (s *Store) applyPush(ctx context.Context, tx *sql.Tx, ns, clientID string, 
 	}
 	err = nil
 
-	upsert := s.q(`
-		INSERT INTO gosync_fields (ns, coll, doc, field, value, hlc, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (ns, coll, doc, field) DO UPDATE
-		SET value = excluded.value, hlc = excluded.hlc, version = excluded.version
-		WHERE gosync_fields.hlc < excluded.hlc`)
-	purgedQ := s.q(`SELECT hlc FROM gosync_purged WHERE ns = ? AND coll = ? AND doc = ?`)
+	// One query finds every compacted document this push touches.
+	purged, err := s.purgedHLCs(ctx, tx, ns, muts, last)
+	if err != nil {
+		return out, false, err
+	}
 
 	newLast := last
 	for _, m := range muts {
@@ -529,24 +545,26 @@ func (s *Store) applyPush(ctx context.Context, tx *sql.Tx, ns, clientID string, 
 
 		// Writes older than a compacted deletion lost to it; ignore them so
 		// the purged document cannot be partially resurrected.
-		var purgedAt string
-		switch err = s.txQueryRow(ctx, tx, s.db, purgedQ, ns, m.Collection, m.Doc).Scan(&purgedAt); {
-		case errors.Is(err, sql.ErrNoRows):
-			err = nil
-		case err != nil:
-			return out, false, err
-		case m.HLC <= purgedAt:
+		if at, ok := purged[docKey{m.Collection, m.Doc}]; ok && m.HLC <= at {
 			continue
 		}
 
-		for field, value := range m.Fields {
-			res, err := s.txExec(ctx, tx, s.db, upsert, ns, m.Collection, m.Doc, field, string(value), m.HLC, version)
-			if err != nil {
-				return out, false, fmt.Errorf("apply mutation %d: %w", m.ID, err)
-			}
-			if n, _ := res.RowsAffected(); n > 0 {
-				out.Changed = true
-			}
+		// All of a mutation's fields in one statement.
+		names := make([]string, 0, len(m.Fields))
+		for name := range m.Fields {
+			names = append(names, name)
+		}
+		sort.Strings(names) // stable statement text for the prepared-statement cache
+		args := make([]any, 0, len(names)*7)
+		for _, name := range names {
+			args = append(args, ns, m.Collection, m.Doc, name, string(m.Fields[name]), m.HLC, version)
+		}
+		res, err := s.txExec(ctx, tx, s.db, s.upsertFields(len(names)), args...)
+		if err != nil {
+			return out, false, fmt.Errorf("apply mutation %d: %w", m.ID, err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			out.Changed = true
 		}
 	}
 	newLast = max(newLast, ackUpTo)
@@ -564,6 +582,57 @@ func (s *Store) applyPush(ctx context.Context, tx *sql.Tx, ns, clientID string, 
 	}
 	out.LastMutationID = newLast
 	return out, true, nil
+}
+
+type docKey struct{ coll, doc string }
+
+// upsertFields returns a statement writing n field rows, each kept only if
+// its HLC is newer than the stored one.
+func (s *Store) upsertFields(n int) string {
+	if q, ok := s.upserts.Load(n); ok {
+		return q.(string)
+	}
+	q := s.q(`INSERT INTO gosync_fields (ns, coll, doc, field, value, hlc, version) VALUES (?, ?, ?, ?, ?, ?, ?)` +
+		strings.Repeat(`, (?, ?, ?, ?, ?, ?, ?)`, n-1) + `
+		ON CONFLICT (ns, coll, doc, field) DO UPDATE
+		SET value = excluded.value, hlc = excluded.hlc, version = excluded.version
+		WHERE gosync_fields.hlc < excluded.hlc`)
+	s.upserts.Store(n, q)
+	return q
+}
+
+// purgedHLCs returns the purge HLC of every compacted document among the
+// new mutations.
+func (s *Store) purgedHLCs(ctx context.Context, tx *sql.Tx, ns string, muts []protocol.Mutation, last int64) (map[docKey]string, error) {
+	seen := map[docKey]bool{}
+	args := []any{ns}
+	for _, m := range muts {
+		k := docKey{m.Collection, m.Doc}
+		if m.ID > last && !seen[k] {
+			seen[k] = true
+			args = append(args, m.Collection, m.Doc)
+		}
+	}
+	out := map[docKey]string{}
+	if len(seen) == 0 {
+		return out, nil
+	}
+	q := s.q(`SELECT coll, doc, hlc FROM gosync_purged WHERE ns = ? AND (coll, doc) IN ((?, ?)` +
+		strings.Repeat(`, (?, ?)`, len(seen)-1) + `)`)
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k docKey
+		var at string
+		if err := rows.Scan(&k.coll, &k.doc, &at); err != nil {
+			return nil, err
+		}
+		out[k] = at
+	}
+	return out, rows.Err()
 }
 
 // collFilter returns " AND coll IN (?, ...)" and its arguments.
