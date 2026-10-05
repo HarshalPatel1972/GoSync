@@ -51,7 +51,20 @@ db.onStatus((s) => console.log(s));              // 'offline' | 'connecting' | '
 Requires Go 1.26+ and Node 18+.
 
 ```bash
-make demo        # or see the Makefile for the two underlying commands
+make demo
+```
+
+Without `make` (for example on Windows), run the two steps yourself:
+
+```bash
+node sdk/js/build.mjs --out examples/todo/gosync
+GOSYNC_INSECURE_DEV_AUTH=true GOSYNC_STATIC_DIR=examples/todo go run ./cmd/gosync-server
+```
+
+```powershell
+# PowerShell
+node sdk/js/build.mjs --out examples/todo/gosync
+$env:GOSYNC_INSECURE_DEV_AUTH="true"; $env:GOSYNC_STATIC_DIR="examples/todo"; go run ./cmd/gosync-server
 ```
 
 Open <http://localhost:8080> in two tabs or browsers. Add todos, stop the server, keep editing,

@@ -1,6 +1,6 @@
 {
   "name": "@harshalpatel2868/gosync-client",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Offline-first, real-time sync for the browser, powered by a Go/WebAssembly engine.",
   "type": "module",
   "main": "./gosync.js",
@@ -28,7 +28,8 @@
     "test": "node test/bridge.mjs && node test/e2e.mjs && node test/browser.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:browser": "node test/browser.mjs",
-    "test:unit": "node test/bridge.mjs"
+    "test:unit": "node test/bridge.mjs",
+    "test:bundlers": "node test/bundlers.mjs"
   },
   "keywords": [
     "offline-first",
