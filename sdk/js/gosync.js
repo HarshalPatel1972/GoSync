@@ -17,9 +17,29 @@ const WASM_EXEC_URL = new URL('./wasm_exec.js', import.meta.url);
 
 let runtimePromise;
 
+// Go's wasm_exec.js is a classic script that defines globalThis.Go. In a
+// browser it is loaded with a <script> tag rather than import(): bundlers
+// (Next.js with Turbopack or webpack) try to resolve dynamic imports
+// themselves and fail, whereas new URL(..., import.meta.url) above is the
+// standard way to make every bundler emit the file as an asset.
+function loadWasmExec() {
+  if (globalThis.Go) return Promise.resolve();
+  if (typeof document === 'undefined') {
+    return import(/* webpackIgnore: true */ /* @vite-ignore */ WASM_EXEC_URL.href); // Node, workers
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = WASM_EXEC_URL.href;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`gosync: could not load ${WASM_EXEC_URL.href}`));
+    document.head.appendChild(script);
+  });
+}
+
 function loadRuntime(wasmUrl) {
   runtimePromise ??= (async () => {
-    if (!globalThis.Go) await import(WASM_EXEC_URL.href);
+    await loadWasmExec();
     const go = new globalThis.Go();
     const ready = new Promise((resolve) => { globalThis.__gosyncReady = resolve; });
     let instance;

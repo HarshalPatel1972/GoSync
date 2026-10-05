@@ -72,6 +72,10 @@ jobs:
         run: node sdk/js/test/e2e.mjs
       - name: Real browsers (multi-tab, failover, persistence)
         run: node sdk/js/test/browser.mjs chromium firefox webkit
+      - name: Bundlers (Vite, Next.js with Turbopack and webpack)
+        env:
+          GOSYNC_SERVER_BIN: ./gosync-server
+        run: node sdk/js/test/bundlers.mjs
 
   load:
     runs-on: ubuntu-latest
