@@ -76,6 +76,17 @@ function merge(fields, incoming) {
   }
 }
 
+// Server change: a purge (tombstone compaction) drops every field at or
+// below its HLC, then fields merge. Must match client.ApplyChange in Go.
+function applyChange(fields, change) {
+  if (change.purged) {
+    for (const [name, value] of Object.entries(fields)) {
+      if (value.t <= change.purged) delete fields[name];
+    }
+  }
+  merge(fields, change.f);
+}
+
 function randomHex(bytes) {
   const b = crypto.getRandomValues(new Uint8Array(bytes));
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
@@ -100,8 +111,8 @@ function createBridge(db) {
       await completion(t);
       return id;
     },
-    async cursor() {
-      return (await request(tx('meta').objectStore('meta').get('cursor'))) ?? 0;
+    async cursor(scope) {
+      return (await request(tx('meta').objectStore('meta').get('cursor:' + scope))) ?? 0;
     },
     async maxHlc() {
       return (await request(tx('meta').objectStore('meta').get('maxHlc'))) ?? '';
@@ -120,19 +131,21 @@ function createBridge(db) {
       await completion(t);
       return id;
     },
-    async applyRemote(changesJSON, cursor) {
+    async applyRemote(changesJSON, scope, cursor) {
       const changes = JSON.parse(changesJSON);
       const t = tx(['docs', 'meta'], 'readwrite');
       const docs = t.objectStore('docs');
       let max = '';
       for (const ch of changes) {
         const doc = (await request(docs.get([ch.c, ch.d]))) ?? { c: ch.c, d: ch.d, f: {} };
-        merge(doc.f, ch.f);
+        applyChange(doc.f, ch);
         for (const v of Object.values(ch.f)) if (v.t > max) max = v.t;
-        docs.put(doc);
+        if (ch.purged && ch.purged > max) max = ch.purged;
+        if (Object.keys(doc.f).length === 0) docs.delete([ch.c, ch.d]);
+        else docs.put(doc);
       }
       const meta = t.objectStore('meta');
-      meta.put(cursor, 'cursor');
+      meta.put(cursor, 'cursor:' + scope);
       if (max) await bumpMaxHlc(meta, max);
       await completion(t);
     },
@@ -161,7 +174,7 @@ function createBridge(db) {
  * See index.d.ts for the full API.
  */
 export async function createClient(options = {}) {
-  const { url, getToken, token, dbName = 'gosync', wasmUrl = DEFAULT_WASM_URL, debug = false } = options;
+  const { url, getToken, token, dbName = 'gosync', wasmUrl = DEFAULT_WASM_URL, collections, debug = false } = options;
   if (!url) throw new TypeError('createClient: `url` is required, e.g. "wss://sync.example.com/sync"');
 
   const [create, db] = await Promise.all([loadRuntime(wasmUrl), openDatabase(dbName)]);
@@ -171,6 +184,7 @@ export async function createClient(options = {}) {
     getToken: getToken ?? (() => token ?? ''),
     bridge,
     nodeSuffix: randomHex(4),
+    collections: collections ? Array.from(collections, String) : undefined,
     debug,
   });
 

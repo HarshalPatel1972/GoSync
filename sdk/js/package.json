@@ -17,18 +17,36 @@
     "gosync.js",
     "index.d.ts",
     "gosync.wasm",
+    "gosync.wasm.br",
+    "gosync.wasm.gz",
     "wasm_exec.js"
   ],
   "scripts": {
     "build": "node build.mjs",
-    "prepublishOnly": "node build.mjs"
+    "prepublishOnly": "node build.mjs",
+    "test": "node test/e2e.mjs && node test/browser.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:browser": "node test/browser.mjs"
   },
-  "keywords": ["offline-first", "local-first", "sync", "indexeddb", "websocket", "crdt", "wasm", "go"],
+  "keywords": [
+    "offline-first",
+    "local-first",
+    "sync",
+    "indexeddb",
+    "websocket",
+    "crdt",
+    "wasm",
+    "go"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/HarshalPatel1972/GoSync.git",
     "directory": "sdk/js"
   },
   "license": "MIT",
-  "sideEffects": false
+  "sideEffects": false,
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "playwright": "^1.63.0"
+  }
 }

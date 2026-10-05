@@ -1,5 +1,9 @@
 // Command gosync-server runs the GoSync sync server.
 //
+//	gosync-server [serve]                      run the server (default)
+//	gosync-server migrate                      apply database migrations and exit
+//	gosync-server compact [-older-than 720h]   purge old tombstones once and exit
+//
 // Configuration is read from environment variables:
 //
 //	GOSYNC_ADDR              listen address (default ":8080")
@@ -13,6 +17,8 @@
 //	GOSYNC_ALLOWED_ORIGINS   comma-separated browser origins, or "*"
 //	GOSYNC_STATIC_DIR        optional directory served at / (e.g. your web app)
 //	GOSYNC_TLS_CERT, GOSYNC_TLS_KEY  serve HTTPS/WSS directly (otherwise terminate TLS at a proxy)
+//	GOSYNC_METRICS_ADDR      private ops listener: Prometheus /metrics and /debug/pprof, e.g. "127.0.0.1:9090" (off by default)
+//	GOSYNC_TOMBSTONE_RETENTION  purge deleted documents after this long (default "720h"; "0" disables)
 //	GOSYNC_LOG_FORMAT        "json" (default) or "text"
 //	GOSYNC_LOG_LEVEL         debug, info (default), warn, error
 package main
@@ -20,24 +26,94 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
+	"path"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/HarshalPatel1972/GoSync/hlc"
 	"github.com/HarshalPatel1972/GoSync/server"
 	"github.com/HarshalPatel1972/GoSync/store/sqlstore"
 )
 
 func main() {
-	if err := run(); err != nil {
+	var err error
+	switch cmd := subcommand(); cmd {
+	case "", "serve":
+		err = run()
+	case "migrate":
+		err = migrateOnly()
+	case "compact":
+		err = compactOnce(os.Args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\nusage: gosync-server [serve | migrate | compact -older-than 720h]\n", cmd)
+		os.Exit(2)
+	}
+	if err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+func subcommand() string {
+	if len(os.Args) > 1 {
+		return os.Args[1]
+	}
+	return ""
+}
+
+// migrateOnly applies schema migrations and exits (for deploy pipelines).
+func migrateOnly() error {
+	slog.SetDefault(newLogger())
+	st, err := sqlstore.Open(context.Background(), env("GOSYNC_DATABASE_URL", "gosync.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	v, err := st.SchemaVersion(context.Background())
+	slog.Info("database schema is up to date", "version", v)
+	return err
+}
+
+// compactOnce runs tombstone compaction to completion and exits. Connected
+// clients learn about it on their next pull.
+func compactOnce(args []string) error {
+	fs := flag.NewFlagSet("compact", flag.ExitOnError)
+	olderThan := fs.Duration("older-than", 720*time.Hour, "purge documents deleted longer ago than this")
+	fs.Parse(args)
+	log := newLogger()
+	st, err := sqlstore.Open(context.Background(), env("GOSYNC_DATABASE_URL", "gosync.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	cutoff := hlc.Timestamp{Wall: time.Now().Add(-*olderThan).UnixMilli()}.String()
+	total := 0
+	for {
+		n, _, err := st.Compact(context.Background(), cutoff, 500)
+		total += n
+		if err != nil {
+			return err
+		}
+		if n < 500 {
+			break
+		}
+	}
+	log.Info("compaction finished", "purged_documents", total)
+	return nil
 }
 
 func env(key, def string) string {
@@ -67,6 +143,26 @@ func run() error {
 	}
 
 	cfg := server.Config{Store: st, Auth: auth, Logger: log}
+	if addr := env("GOSYNC_METRICS_ADDR", ""); addr != "" {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+		cfg.Metrics = server.NewMetrics(reg)
+		// The metrics listener is private (bind it to an internal interface),
+		// so it also carries the Go profiler for diagnosing production issues.
+		opsMux := http.NewServeMux()
+		opsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		opsMux.HandleFunc("/debug/pprof/", pprof.Index)
+		opsMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		opsMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		metricsSrv := &http.Server{Addr: addr, Handler: opsMux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Info("serving metrics", "addr", addr)
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics server failed", "err", err)
+			}
+		}()
+		defer metricsSrv.Close()
+	}
 	if origins := env("GOSYNC_ALLOWED_ORIGINS", ""); origins != "" {
 		for _, o := range strings.Split(origins, ",") {
 			cfg.AllowedOrigins = append(cfg.AllowedOrigins, strings.TrimSpace(o))
@@ -81,6 +177,17 @@ func run() error {
 	srv, err := server.New(cfg)
 	if err != nil {
 		return err
+	}
+
+	retention, err := time.ParseDuration(env("GOSYNC_TOMBSTONE_RETENTION", "720h"))
+	if err != nil {
+		return fmt.Errorf("GOSYNC_TOMBSTONE_RETENTION: %w", err)
+	}
+	if retention > 0 {
+		if retention < 24*time.Hour {
+			return errors.New("GOSYNC_TOMBSTONE_RETENTION must be at least 24h: devices offline longer than this may hold deleted data")
+		}
+		go srv.RunCompaction(ctx, retention, time.Hour)
 	}
 
 	mux := http.NewServeMux()
@@ -159,16 +266,59 @@ func newAuth(ctx context.Context, log *slog.Logger) (server.Authenticator, error
 	})
 }
 
-// staticHandler serves dir with the right MIME type for .wasm and without
-// caching, so redeploys are picked up.
+// staticHandler serves dir. For a file with a precompressed sibling
+// (file.br or file.gz) it sends that when the client accepts it; the browser
+// SDK ships gosync.wasm.br, cutting the download by about 80%.
 func staticHandler(dir string) http.Handler {
-	fs := http.FileServer(http.Dir(dir))
+	root := http.Dir(dir)
+	fs := http.FileServer(root)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Cache-Control", "no-cache") // revalidate so redeploys are picked up
 		if strings.HasSuffix(r.URL.Path, ".wasm") {
-			w.Header().Set("Content-Type", "application/wasm")
+			h.Set("Content-Type", "application/wasm")
 		}
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+		h.Add("Vary", "Accept-Encoding")
+		accept := r.Header.Get("Accept-Encoding")
+		for _, enc := range []struct{ token, ext string }{{"br", ".br"}, {"gzip", ".gz"}} {
+			if !acceptsEncoding(accept, enc.token) {
+				continue
+			}
+			f, err := root.Open(r.URL.Path + enc.ext)
+			if err != nil {
+				continue
+			}
+			info, err := f.Stat()
+			if err != nil || info.IsDir() {
+				f.Close()
+				continue
+			}
+			if h.Get("Content-Type") == "" {
+				if ct := mime.TypeByExtension(path.Ext(r.URL.Path)); ct != "" {
+					h.Set("Content-Type", ct)
+				}
+			}
+			h.Set("Content-Encoding", enc.token)
+			http.ServeContent(w, r, r.URL.Path, info.ModTime(), f)
+			f.Close()
+			return
+		}
 		fs.ServeHTTP(w, r)
 	})
+}
+
+func acceptsEncoding(header, token string) bool {
+	for _, part := range strings.Split(header, ",") {
+		name, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+		if !strings.EqualFold(strings.TrimSpace(name), token) {
+			continue
+		}
+		if q, ok := strings.CutPrefix(strings.TrimSpace(params), "q="); ok {
+			v, err := strconv.ParseFloat(q, 64)
+			return err == nil && v > 0
+		}
+		return true
+	}
+	return false
 }

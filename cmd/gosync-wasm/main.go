@@ -9,8 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
-	"os"
+	"fmt"
 	"syscall/js"
 
 	"github.com/HarshalPatel1972/GoSync/client"
@@ -25,24 +24,31 @@ func main() {
 }
 
 // create(options) -> Promise<engine>. options: {url, getToken, bridge,
-// nodeSuffix, debug}.
+// nodeSuffix, collections, debug}.
 func create(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return js.Global().Get("Promise").Call("reject", jsError(errors.New("missing options")))
 	}
 	opts := args[0]
 	return promise(func() (any, error) {
-		level := slog.LevelWarn
+		var logger client.Logger
 		if opts.Get("debug").Truthy() {
-			level = slog.LevelDebug
+			logger = consoleLogger{}
 		}
 		getToken := opts.Get("getToken")
+		var collections []string
+		if cs := opts.Get("collections"); cs.Type() == js.TypeObject {
+			for i := 0; i < cs.Length(); i++ {
+				collections = append(collections, cs.Index(i).String())
+			}
+		}
 		c, err := client.New(context.Background(), client.Options{
-			URL:        opts.Get("url").String(),
-			Store:      idbStore{bridge: opts.Get("bridge")},
-			Dialer:     browserDialer{},
-			NodeSuffix: opts.Get("nodeSuffix").String(),
-			Logger:     slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})),
+			URL:         opts.Get("url").String(),
+			Store:       idbStore{bridge: opts.Get("bridge")},
+			Dialer:      browserDialer{},
+			Collections: collections,
+			NodeSuffix:  opts.Get("nodeSuffix").String(),
+			Logger:      logger,
 			Token: func(ctx context.Context) (string, error) {
 				if getToken.Type() != js.TypeFunction {
 					return "", nil
@@ -163,4 +169,22 @@ func engineObject(c *client.Client) js.Value {
 
 func docJSON(d client.Document) map[string]any {
 	return map[string]any{"id": d.ID, "fields": d.Fields}
+}
+
+// consoleLogger writes debug output to the browser console.
+type consoleLogger struct{}
+
+func (consoleLogger) Debug(msg string, args ...any) {
+	jsArgs := []any{"[gosync] " + msg}
+	for _, a := range args {
+		if err, ok := a.(error); ok {
+			a = err.Error()
+		}
+		if v, ok := a.(string); ok {
+			jsArgs = append(jsArgs, v)
+		} else {
+			jsArgs = append(jsArgs, js.ValueOf(fmt.Sprint(a)))
+		}
+	}
+	js.Global().Get("console").Call("debug", jsArgs...)
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/HarshalPatel1972/GoSync/hlc"
 	"github.com/HarshalPatel1972/GoSync/store"
 )
 
@@ -29,6 +30,8 @@ type Config struct {
 	// header (native clients) are always allowed; they still need a token.
 	AllowedOrigins []string
 	Logger         *slog.Logger
+	// Metrics records Prometheus metrics when non-nil (see NewMetrics).
+	Metrics *Metrics
 
 	// Tuning; zero values use the defaults below.
 	MaxConnections  int           // default 10000
@@ -159,6 +162,42 @@ func (s *Server) ServeSync(w http.ResponseWriter, r *http.Request) {
 	}
 	c := newConn(s, ws, r.RemoteAddr)
 	c.serve(r.Context())
+}
+
+// RunCompaction purges documents deleted more than retention ago, every
+// interval, until ctx is done. It does nothing if the store cannot compact.
+// Running it on several instances at once is safe.
+func (s *Server) RunCompaction(ctx context.Context, retention, interval time.Duration) {
+	c, ok := s.cfg.Store.(store.Compactor)
+	if !ok || retention <= 0 {
+		return
+	}
+	const batch = 500
+	for {
+		cutoff := hlc.Timestamp{Wall: time.Now().Add(-retention).UnixMilli()}.String()
+		for ctx.Err() == nil {
+			n, namespaces, err := c.Compact(ctx, cutoff, batch)
+			if err != nil {
+				s.log.Error("tombstone compaction failed", "err", err)
+				break
+			}
+			s.cfg.Metrics.compactedDocs(n)
+			for _, ns := range namespaces {
+				s.cfg.Broker.Publish(ctx, ns, "")
+			}
+			if n > 0 {
+				s.log.Info("compacted tombstones", "documents", n, "namespaces", len(namespaces))
+			}
+			if n < batch {
+				break
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
 }
 
 // Shutdown stops accepting sessions, asks every client to reconnect

@@ -26,6 +26,7 @@ type conn struct {
 	log       *slog.Logger
 	principal Principal
 	clientID  string
+	scope     []string // collections this session pulls; empty = all
 	limiter   *rate.Limiter
 
 	out   chan []byte   // frames for the writer goroutine
@@ -92,6 +93,8 @@ func (c *conn) serve(ctx context.Context) {
 	}
 	c.s.hub.add(c)
 	defer c.s.hub.remove(c)
+	c.s.cfg.Metrics.sessionStarted()
+	defer c.s.cfg.Metrics.sessionEnded()
 	c.log.Info("session started", "sub", c.principal.Subject, "client", c.clientID)
 
 	go c.writeLoop()
@@ -125,6 +128,10 @@ func (c *conn) handshake(ctx context.Context) error {
 		return err
 	}
 	fail := func(code, msg string) error {
+		if code != protocol.ErrInternal {
+			c.s.cfg.Metrics.authFailed()
+		}
+		c.s.cfg.Metrics.errorSent(code)
 		b, _ := protocol.Encode(protocol.TypeError, protocol.Error{Code: code, Message: msg, Fatal: true})
 		c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 		c.ws.WriteMessage(websocket.TextMessage, b)
@@ -141,7 +148,7 @@ func (c *conn) handshake(ctx context.Context) error {
 	if hello.Version != protocol.Version {
 		return fail(protocol.ErrVersion, fmt.Sprintf("server speaks protocol version %d", protocol.Version))
 	}
-	if err := protocol.ValidateClientID(hello.ClientID); err != nil {
+	if err := protocol.ValidateHello(hello); err != nil {
 		return fail(protocol.ErrBadRequest, err.Error())
 	}
 	if len(hello.Token) > protocol.MaxTokenLen {
@@ -154,7 +161,7 @@ func (c *conn) handshake(ctx context.Context) error {
 		c.log.Info("authentication failed", "err", err)
 		return fail(protocol.ErrUnauthorized, "invalid or expired token")
 	}
-	c.principal, c.clientID = p, hello.ClientID
+	c.principal, c.clientID, c.scope = p, hello.ClientID, hello.Collections
 
 	last, err := c.s.cfg.Store.LastMutationID(ctx, p.Namespace, hello.ClientID)
 	if err != nil {
@@ -182,6 +189,7 @@ func (c *conn) readLoop(ctx context.Context) error {
 			c.sendError(protocol.ErrRateLimited, "too many messages", true)
 			return errClosed
 		}
+		c.s.cfg.Metrics.message(env.Type)
 		var err error
 		switch env.Type {
 		case protocol.TypePush:
@@ -216,6 +224,7 @@ func badRequest(format string, args ...any) error {
 }
 
 func (c *conn) handlePush(ctx context.Context, data json.RawMessage) error {
+	defer c.s.cfg.Metrics.observe("push", time.Now())
 	var push protocol.Push
 	if err := json.Unmarshal(data, &push); err != nil {
 		return badRequest("malformed push")
@@ -249,11 +258,13 @@ func (c *conn) handlePush(ctx context.Context, data json.RawMessage) error {
 		valid = append(valid, m)
 	}
 
+	c.s.cfg.Metrics.mutations(len(valid), len(rejected))
 	out, err := c.s.cfg.Store.Push(ctx, c.principal.Namespace, c.clientID, valid, upTo)
 	if err != nil {
 		return err
 	}
 	if out.Changed {
+		c.s.cfg.Metrics.poked()
 		if err := c.s.cfg.Broker.Publish(ctx, c.principal.Namespace, c.id); err != nil {
 			c.log.Warn("publish change notification", "err", err)
 		}
@@ -265,11 +276,12 @@ func (c *conn) handlePush(ctx context.Context, data json.RawMessage) error {
 }
 
 func (c *conn) handlePull(ctx context.Context, data json.RawMessage) error {
+	defer c.s.cfg.Metrics.observe("pull", time.Now())
 	var pull protocol.Pull
 	if err := json.Unmarshal(data, &pull); err != nil {
 		return badRequest("malformed pull")
 	}
-	res, err := c.s.cfg.Store.Pull(ctx, c.principal.Namespace, pull.Cursor, c.s.cfg.PullBudgetBytes)
+	res, err := c.s.cfg.Store.Pull(ctx, c.principal.Namespace, pull.Cursor, c.scope, c.s.cfg.PullBudgetBytes)
 	if err != nil {
 		return err
 	}
@@ -290,6 +302,7 @@ func (c *conn) send(typ string, payload any) error {
 }
 
 func (c *conn) sendError(code, msg string, fatal bool) {
+	c.s.cfg.Metrics.errorSent(code)
 	c.send(protocol.TypeError, protocol.Error{Code: code, Message: msg, Fatal: fatal})
 	if fatal {
 		c.finish(websocket.ClosePolicyViolation, code)

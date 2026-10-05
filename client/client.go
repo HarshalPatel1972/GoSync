@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -74,11 +73,25 @@ type Options struct {
 	Token  func(ctx context.Context) (string, error)
 	Store  LocalStore
 	Dialer Dialer
+	// Collections limits which collections are pulled from the server;
+	// empty syncs everything. Writes to any collection are always pushed.
+	Collections []string
 	// NodeSuffix distinguishes concurrent writers sharing one LocalStore
 	// (e.g. browser tabs). Optional.
 	NodeSuffix string
-	Logger     *slog.Logger
+	// Logger receives debug output. *slog.Logger satisfies it. Optional.
+	Logger Logger
 }
+
+// Logger is the logging the engine needs. It is an interface rather than
+// *slog.Logger so the browser build does not link log/slog.
+type Logger interface {
+	Debug(msg string, args ...any)
+}
+
+type nopLogger struct{}
+
+func (nopLogger) Debug(string, ...any) {}
 
 // Document is a live (not deleted) document.
 type Document struct {
@@ -89,7 +102,7 @@ type Document struct {
 // Client is a GoSync replica. All methods are safe for concurrent use.
 type Client struct {
 	opts     Options
-	log      *slog.Logger
+	log      Logger
 	clientID string
 	clock    *hlc.Clock
 	offsetMS atomic.Int64 // server time - local time
@@ -116,7 +129,7 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		return nil, errors.New("client: Store is required")
 	}
 	if opts.Logger == nil {
-		opts.Logger = slog.Default()
+		opts.Logger = nopLogger{}
 	}
 	id, err := opts.Store.ClientID(ctx)
 	if err != nil {
@@ -344,7 +357,7 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 			return false, fmt.Errorf("get token: %w", err)
 		}
 	}
-	if err := c.send(dialCtx, conn, protocol.TypeHello, protocol.Hello{Version: protocol.Version, Token: token, ClientID: c.clientID}); err != nil {
+	if err := c.send(dialCtx, conn, protocol.TypeHello, protocol.Hello{Version: protocol.Version, Token: token, ClientID: c.clientID, Collections: c.opts.Collections}); err != nil {
 		return false, err
 	}
 	sent := time.Now()
@@ -365,7 +378,8 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 	if err := c.opts.Store.Ack(ctx, welcome.LastMutationID); err != nil {
 		return true, err
 	}
-	cursor, err := c.opts.Store.Cursor(ctx)
+	scope := ScopeKey(c.opts.Collections)
+	cursor, err := c.opts.Store.Cursor(ctx, scope)
 	if err != nil {
 		return true, err
 	}
@@ -438,7 +452,7 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 				if err := json.Unmarshal(env.Data, &res); err != nil {
 					return true, err
 				}
-				if err := c.applyRemote(ctx, res); err != nil {
+				if err := c.applyRemote(ctx, res, scope); err != nil {
 					return true, err
 				}
 				cursor = res.Cursor
@@ -453,13 +467,16 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 	}
 }
 
-func (c *Client) applyRemote(ctx context.Context, res protocol.PullResult) error {
+func (c *Client) applyRemote(ctx context.Context, res protocol.PullResult, scope string) error {
 	for _, ch := range res.Changes {
 		for _, f := range ch.Fields {
 			c.ObserveHLC(f.HLC)
 		}
+		if ch.Purged != "" {
+			c.ObserveHLC(ch.Purged)
+		}
 	}
-	if err := c.opts.Store.ApplyRemote(ctx, res.Changes, res.Cursor); err != nil {
+	if err := c.opts.Store.ApplyRemote(ctx, res.Changes, scope, res.Cursor); err != nil {
 		return err
 	}
 	byColl := map[string][]string{}

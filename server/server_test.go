@@ -18,6 +18,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/HarshalPatel1972/GoSync/client"
 	"github.com/HarshalPatel1972/GoSync/protocol"
@@ -28,15 +30,20 @@ import (
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type env struct {
-	t     *testing.T
-	store *sqlstore.Store
-	http  *httptest.Server
-	srv   atomic.Pointer[server.Server]
-	auth  server.Authenticator
-	url   string
+	t       *testing.T
+	metrics *server.Metrics
+	store   *sqlstore.Store
+	http    *httptest.Server
+	srv     atomic.Pointer[server.Server]
+	auth    server.Authenticator
+	url     string
 }
 
 func newEnv(t *testing.T, auth server.Authenticator) *env {
+	return newEnvWith(t, &env{t: t}, auth)
+}
+
+func newEnvWith(t *testing.T, e *env, auth server.Authenticator) *env {
 	t.Helper()
 	st, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
@@ -45,7 +52,7 @@ func newEnv(t *testing.T, auth server.Authenticator) *env {
 	if auth == nil {
 		auth = server.InsecureDevAuthenticator()
 	}
-	e := &env{t: t, store: st, auth: auth}
+	e.store, e.auth = st, auth
 	e.restart()
 	e.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.srv.Load().Handler().ServeHTTP(w, r)
@@ -61,7 +68,7 @@ func newEnv(t *testing.T, auth server.Authenticator) *env {
 
 // restart swaps in a fresh Server on the same store, dropping all sessions.
 func (e *env) restart() {
-	srv, err := server.New(server.Config{Store: e.store, Auth: e.auth, Logger: quiet, PullBudgetBytes: 4096})
+	srv, err := server.New(server.Config{Store: e.store, Auth: e.auth, Logger: quiet, PullBudgetBytes: 4096, Metrics: e.metrics})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -81,15 +88,16 @@ type testClient struct {
 	errs   []error
 }
 
-func (e *env) client(token string) *testClient {
+func (e *env) client(token string, collections ...string) *testClient {
 	e.t.Helper()
 	st := client.NewMemoryStore()
 	c, err := client.New(context.Background(), client.Options{
-		URL:    e.url,
-		Token:  func(context.Context) (string, error) { return token, nil },
-		Store:  st,
-		Dialer: client.WebSocketDialer{},
-		Logger: quiet,
+		URL:         e.url,
+		Token:       func(context.Context) (string, error) { return token, nil },
+		Store:       st,
+		Dialer:      client.WebSocketDialer{},
+		Logger:      quiet,
+		Collections: collections,
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -374,5 +382,81 @@ func TestHelloRequired(t *testing.T) {
 	}
 	if _, _, err := ws.ReadMessage(); err == nil {
 		t.Fatal("connection should be closed")
+	}
+}
+
+func TestCompactionReachesClients(t *testing.T) {
+	e := newEnv(t, nil)
+	a, b := e.client("alice"), e.client("alice")
+	a.start()
+	b.start()
+	a.set(t, "todos", "old", map[string]any{"title": "x"})
+	a.set(t, "todos", "keep", map[string]any{"title": "y"})
+	eventually(t, "B synced", func() bool { return b.snapshot("todos") == a.snapshot("todos") })
+	if err := a.Delete(context.Background(), "todos", "old"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "delete synced", func() bool { return !strings.Contains(b.snapshot("todos"), "old=") })
+
+	// Compact everything deleted before "an hour from now".
+	cutoff := fmt.Sprintf("%015d-000000-", time.Now().Add(time.Hour).UnixMilli())
+	n, nss, err := e.store.Compact(context.Background(), cutoff, 100)
+	if err != nil || n != 1 {
+		t.Fatalf("compact: n=%d err=%v", n, err)
+	}
+	if len(nss) != 1 {
+		t.Fatalf("namespaces %v", nss)
+	}
+	// Any change pokes B; it then pulls the purge record and drops the tombstone.
+	a.set(t, "todos", "keep", map[string]any{"title": "y2"})
+	eventually(t, "B dropped the tombstone", func() bool {
+		_, ok, _ := b.store.Get(context.Background(), "todos", "old")
+		return !ok && strings.Contains(b.snapshot("todos"), "y2")
+	})
+}
+
+func TestScopedSync(t *testing.T) {
+	e := newEnv(t, nil)
+	writer := e.client("alice")
+	todosOnly := e.client("alice", "todos")
+	writer.start()
+	todosOnly.start()
+	writer.set(t, "notes", "n1", map[string]any{"v": 1})
+	writer.set(t, "todos", "t1", map[string]any{"v": 2})
+	eventually(t, "todo arrives", func() bool { return todosOnly.snapshot("todos") != "" })
+	time.Sleep(200 * time.Millisecond)
+	if got := todosOnly.snapshot("notes"); got != "" {
+		t.Fatalf("scoped client received notes: %s", got)
+	}
+	// Its own writes to other collections still sync.
+	todosOnly.set(t, "notes", "n2", map[string]any{"v": 3})
+	eventually(t, "scoped client's note pushed", func() bool { return strings.Contains(writer.snapshot("notes"), "n2=") })
+}
+
+func TestMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	e := &env{t: t, metrics: server.NewMetrics(reg)}
+	e = newEnvWith(t, e, nil)
+	c := e.client("alice")
+	c.start()
+	c.set(t, "todos", "t1", map[string]any{"v": 1})
+	eventually(t, "pushed", func() bool {
+		p, _ := c.store.Pending(context.Background(), 1)
+		return len(p) == 0
+	})
+	bad := e.client("") // empty token fails dev auth
+	bad.start()
+	eventually(t, "auth failure recorded", func() bool {
+		return testutil.ToFloat64(e.metrics.AuthFailures()) >= 1
+	})
+	families, _ := reg.Gather()
+	names := map[string]bool{}
+	for _, f := range families {
+		names[f.GetName()] = true
+	}
+	for _, want := range []string{"gosync_sessions", "gosync_sessions_total", "gosync_messages_total", "gosync_request_duration_seconds", "gosync_mutations_received_total"} {
+		if !names[want] {
+			t.Errorf("metric %s missing", want)
+		}
 	}
 }

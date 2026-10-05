@@ -16,7 +16,7 @@ import (
 type MemoryStore struct {
 	mu       sync.Mutex
 	clientID string
-	cursor   int64
+	cursors  map[string]int64
 	maxHLC   string
 	nextID   int64
 	docs     map[string]map[string]*StoredDoc // collection -> id -> doc
@@ -24,7 +24,7 @@ type MemoryStore struct {
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{docs: map[string]map[string]*StoredDoc{}}
+	return &MemoryStore{docs: map[string]map[string]*StoredDoc{}, cursors: map[string]int64{}}
 }
 
 func (s *MemoryStore) ClientID(context.Context) (string, error) {
@@ -38,10 +38,10 @@ func (s *MemoryStore) ClientID(context.Context) (string, error) {
 	return s.clientID, nil
 }
 
-func (s *MemoryStore) Cursor(context.Context) (int64, error) {
+func (s *MemoryStore) Cursor(_ context.Context, scope string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cursor, nil
+	return s.cursors[scope], nil
 }
 
 func (s *MemoryStore) MaxHLC(context.Context) (string, error) {
@@ -78,16 +78,20 @@ func (s *MemoryStore) Write(_ context.Context, collection, id string, fields map
 	return s.nextID, nil
 }
 
-func (s *MemoryStore) ApplyRemote(_ context.Context, changes []protocol.DocChange, cursor int64) error {
+func (s *MemoryStore) ApplyRemote(_ context.Context, changes []protocol.DocChange, scope string, cursor int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, ch := range changes {
-		MergeFields(s.doc(ch.Collection, ch.Doc).Fields, ch.Fields)
+		d := s.doc(ch.Collection, ch.Doc)
+		ApplyChange(d.Fields, ch)
+		if len(d.Fields) == 0 {
+			delete(s.docs[ch.Collection], ch.Doc)
+		}
 		for _, f := range ch.Fields {
 			s.maxHLC = max(s.maxHLC, f.HLC)
 		}
 	}
-	s.cursor = cursor
+	s.cursors[scope] = cursor
 	return nil
 }
 

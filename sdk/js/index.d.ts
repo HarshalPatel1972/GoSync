@@ -20,6 +20,12 @@ export interface ClientOptions {
   dbName?: string;
   /** Where to load gosync.wasm from. Default: next to this module. */
   wasmUrl?: string | URL;
+  /**
+   * Only pull these collections from the server (default: all). Writes to
+   * any collection are still pushed. All tabs sharing a dbName must use the
+   * same list.
+   */
+  collections?: string[];
   /** Log sync activity to the console. */
   debug?: boolean;
 }

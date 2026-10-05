@@ -32,7 +32,7 @@ func stores(t *testing.T) map[string]*Store {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, tbl := range []string{"gosync_fields", "gosync_clients", "gosync_spaces"} {
+		for _, tbl := range []string{"gosync_fields", "gosync_purged", "gosync_clients", "gosync_spaces"} {
 			if _, err := p.db.Exec("DELETE FROM " + tbl); err != nil {
 				t.Fatal(err)
 			}
@@ -54,7 +54,7 @@ func pullAll(t *testing.T, s *Store, ns string, cursor int64) (map[string]map[st
 	t.Helper()
 	docs := map[string]map[string]string{}
 	for {
-		res, err := s.Pull(context.Background(), ns, cursor, 1<<20)
+		res, err := s.Pull(context.Background(), ns, cursor, nil, 1<<20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,7 +150,7 @@ func TestIncrementalPullAndPagination(t *testing.T) {
 			seen := map[string]bool{}
 			cursor, pages := int64(0), 0
 			for {
-				res, err := s.Pull(ctx, "u1", cursor, 1)
+				res, err := s.Pull(ctx, "u1", cursor, nil, 1)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -203,6 +203,94 @@ func TestConcurrentPushesConverge(t *testing.T) {
 			// Highest HLC is wall 20*10+7 from c7.
 			if docs["shared"]["v"] != `"c7-20"` {
 				t.Fatalf("expected c7-20 to win, got %v", docs["shared"])
+			}
+		})
+	}
+}
+
+func TestMigrationsAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "m.db")
+	for range 2 {
+		s, err := Open(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := s.SchemaVersion(ctx)
+		if err != nil || v != len(s.migrations()) {
+			t.Fatalf("schema version %d err %v", v, err)
+		}
+		s.Close()
+	}
+}
+
+func TestCompactionPurgesTombstones(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			push := func(id int64, doc, field, value string, wall int64) {
+				t.Helper()
+				if _, err := s.Push(ctx, "u1", "A", []protocol.Mutation{mut(id, doc, field, value, ts(wall, "A"))}, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			push(1, "gone", "title", `"x"`, 100)
+			push(2, "gone", protocol.FieldDeleted, "true", 110)
+			push(3, "revived", "title", `"y"`, 100)
+			push(4, "revived", protocol.FieldDeleted, "true", 110)
+			push(5, "revived", protocol.FieldDeleted, "false", 120)
+			push(6, "recent", protocol.FieldDeleted, "true", 5000)
+			_, cursor := pullAll(t, s, "u1", 0)
+
+			n, nss, err := s.Compact(ctx, ts(1000, ""), 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != 1 || len(nss) != 1 || nss[0] != "u1" {
+				t.Fatalf("compacted %d in %v, want 1 in [u1]", n, nss)
+			}
+
+			// A client that saw the doc learns about the purge.
+			res, err := s.Pull(ctx, "u1", cursor, nil, 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Changes) != 1 || res.Changes[0].Doc != "gone" || res.Changes[0].Purged != ts(110, "A") {
+				t.Fatalf("expected purge record for gone, got %+v", res.Changes)
+			}
+			// A fresh client never hears of it.
+			docs, _ := pullAll(t, s, "u1", 0)
+			if _, ok := docs["gone"]; ok || docs["revived"]["title"] != `"y"` {
+				t.Fatalf("fresh pull: %v", docs)
+			}
+			// A stale write from a long-offline device cannot resurrect it...
+			push(7, "gone", "title", `"stale"`, 105)
+			if docs, _ := pullAll(t, s, "u1", 0); docs["gone"] != nil {
+				t.Fatalf("stale write resurrected purged doc: %v", docs["gone"])
+			}
+			// ...but a genuinely later write revives it.
+			push(8, "gone", "title", `"new"`, 2000)
+			if docs, _ := pullAll(t, s, "u1", 0); docs["gone"]["title"] != `"new"` {
+				t.Fatalf("later write did not revive: %v", docs["gone"])
+			}
+		})
+	}
+}
+
+func TestPullFiltersCollections(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			m1 := mut(1, "a", "v", `1`, ts(1, "A"))
+			m2 := mut(2, "b", "v", `2`, ts(2, "A"))
+			m2.Collection = "notes"
+			s.Push(ctx, "u1", "A", []protocol.Mutation{m1, m2}, 0)
+			res, err := s.Pull(ctx, "u1", 0, []string{"notes"}, 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Changes) != 1 || res.Changes[0].Collection != "notes" {
+				t.Fatalf("filter failed: %+v", res.Changes)
 			}
 		})
 	}

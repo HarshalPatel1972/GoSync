@@ -54,6 +54,7 @@ const (
 	MaxFieldNameLen     = 64
 	MaxClientIDLen      = 64
 	MaxTokenLen         = 16 << 10
+	MaxCollections      = 64 // per hello
 )
 
 // Envelope is the outer frame.
@@ -67,6 +68,9 @@ type Hello struct {
 	Version  int    `json:"version"`
 	Token    string `json:"token"`
 	ClientID string `json:"clientId"`
+	// Collections limits pulls to these collections; empty means all. A
+	// cursor is only meaningful for the collection set it was pulled with.
+	Collections []string `json:"collections,omitempty"`
 }
 
 // Welcome confirms authentication. ServerTime (unix ms) lets clients correct
@@ -118,10 +122,15 @@ type FieldValue struct {
 }
 
 // DocChange carries the latest value of changed fields of one document.
+//
+// Purged, when set, reports that the server compacted the document after a
+// deletion with that HLC: replicas drop every field whose HLC is at or below
+// it (fields set later, e.g. by an offline revival, stay).
 type DocChange struct {
 	Collection string                `json:"c"`
 	Doc        string                `json:"d"`
 	Fields     map[string]FieldValue `json:"f"`
+	Purged     string                `json:"purged,omitempty"`
 }
 
 // PullResult returns changes up to Cursor. When More is set the client should
@@ -180,6 +189,22 @@ func validateName(what, s string, max int) error {
 		c := s[i]
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
 			return fmt.Errorf("%s may only contain letters, digits, '_', '-' and '.'", what)
+		}
+	}
+	return nil
+}
+
+// ValidateHello checks a hello's client-supplied fields (not the token).
+func ValidateHello(h Hello) error {
+	if err := ValidateClientID(h.ClientID); err != nil {
+		return err
+	}
+	if len(h.Collections) > MaxCollections {
+		return fmt.Errorf("at most %d collections", MaxCollections)
+	}
+	for _, c := range h.Collections {
+		if err := ValidateCollection(c); err != nil {
+			return err
 		}
 	}
 	return nil

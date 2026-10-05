@@ -1,6 +1,7 @@
 // End-to-end test of the real browser SDK (gosync.js + gosync.wasm) against a
 // running server, with fake-indexeddb standing in for the browser's IndexedDB.
 import 'fake-indexeddb/auto';
+import { execFileSync } from 'node:child_process';
 import { createClient } from '../gosync.js';
 
 // Expects a server started with GOSYNC_INSECURE_DEV_AUTH=true and
@@ -10,7 +11,7 @@ const WASM = BASE + '/gosync/gosync.wasm';
 const URL_OK = BASE.replace(/^http/, 'ws') + '/sync';
 const URL_DOWN = 'ws://127.0.0.1:1/sync'; // nothing listens: simulates offline
 
-const open = (dbName, user, url = URL_OK) => createClient({ url, token: user, dbName, wasmUrl: WASM });
+const open = (dbName, user, url = URL_OK, extra = {}) => createClient({ url, token: user, dbName, wasmUrl: WASM, ...extra });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(what, fn, ms = 10000) {
   const end = Date.now() + ms;
@@ -78,6 +79,37 @@ const norm = (d) => JSON.stringify({ body: d?.body, title: d?.title, id: d?.id }
 await until('concurrent edits converge', async () => norm(await offline.get('docs', 'x')) === want && norm(await A.get('docs', 'x')) === want);
 ok('concurrent offline edits to different fields merge on both replicas');
 
-for (const c of [A, B, bob, offline]) c.close();
+// Scoped sync: a client that only pulls "todos".
+const scoped = await open('S-' + run, 'alice-' + run, URL_OK, { collections: ['todos'] });
+await A.set('todos', 'scoped-yes', { v: 1 });
+await until('scoped client gets todos', async () => (await scoped.get('todos', 'scoped-yes')) !== null);
+if ((await scoped.list('notes')).length !== 0) throw new Error('scoped client pulled notes');
+ok('collection-scoped client pulls only its collections');
+
+// Tombstone compaction reaches the IndexedDB bridge (needs the server binary).
+const rawDoc = (dbName, key) => new Promise((resolve, reject) => {
+  const r = indexedDB.open(dbName);
+  r.onsuccess = () => {
+    const g = r.result.transaction('docs').objectStore('docs').get(key);
+    g.onsuccess = () => { r.result.close(); resolve(g.result); };
+    g.onerror = () => reject(g.error);
+  };
+  r.onerror = () => reject(r.error);
+});
+if (process.env.GOSYNC_SERVER_BIN && process.env.GOSYNC_DATABASE_URL) {
+  await A.set('todos', 'purge-me', { v: 1 });
+  await until('B has purge-me', async () => (await B.get('todos', 'purge-me')) !== null);
+  await A.delete('todos', 'purge-me');
+  await until('B sees delete', async () => (await B.get('todos', 'purge-me')) === null);
+  if (!(await rawDoc('B-' + run, ['todos', 'purge-me']))) throw new Error('expected a local tombstone before compaction');
+  execFileSync(process.env.GOSYNC_SERVER_BIN, ['compact', '-older-than', '-1h'], { stdio: 'inherit' });
+  await A.set('todos', 'poke', { v: Date.now() }); // any change pokes B to pull
+  await until('B dropped the tombstone', async () => (await rawDoc('B-' + run, ['todos', 'purge-me'])) === undefined);
+  ok('tombstone compaction removes the local tombstone in IndexedDB');
+} else {
+  console.log('  - skipped compaction check (set GOSYNC_SERVER_BIN and GOSYNC_DATABASE_URL)');
+}
+
+for (const c of [A, B, bob, offline, scoped]) c.close();
 console.log(`\n${passed} checks passed`);
 process.exit(0);

@@ -35,8 +35,8 @@ func (s idbStore) ClientID(ctx context.Context) (string, error) {
 	return v.String(), nil
 }
 
-func (s idbStore) Cursor(ctx context.Context) (int64, error) {
-	v, err := s.call(ctx, "cursor")
+func (s idbStore) Cursor(ctx context.Context, scope string) (int64, error) {
+	v, err := s.call(ctx, "cursor", scope)
 	if err != nil {
 		return 0, err
 	}
@@ -67,20 +67,20 @@ func (s idbStore) Write(ctx context.Context, collection, id string, fields map[s
 	return int64(v.Float()), nil
 }
 
-func (s idbStore) ApplyRemote(ctx context.Context, changes []protocol.DocChange, cursor int64) error {
+func (s idbStore) ApplyRemote(ctx context.Context, changes []protocol.DocChange, scope string, cursor int64) error {
 	docs := make([]bridgeDoc, len(changes))
 	for i, ch := range changes {
 		f := make(map[string]bridgeField, len(ch.Fields))
 		for k, v := range ch.Fields {
 			f[k] = bridgeField{V: string(v.Value), T: v.HLC}
 		}
-		docs[i] = bridgeDoc{C: ch.Collection, D: ch.Doc, F: f}
+		docs[i] = bridgeDoc{C: ch.Collection, D: ch.Doc, F: f, Purged: ch.Purged}
 	}
 	b, err := json.Marshal(docs)
 	if err != nil {
 		return err
 	}
-	_, err = s.call(ctx, "applyRemote", string(b), float64(cursor))
+	_, err = s.call(ctx, "applyRemote", string(b), scope, float64(cursor))
 	return err
 }
 
@@ -120,6 +120,8 @@ type bridgeDoc struct {
 	C string                 `json:"c"`
 	D string                 `json:"d"`
 	F map[string]bridgeField `json:"f"`
+	// Purged is only set on changes sent to applyRemote.
+	Purged string `json:"purged,omitempty"`
 }
 
 type bridgeField struct {

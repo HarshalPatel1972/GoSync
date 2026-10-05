@@ -36,10 +36,19 @@ type Store interface {
 	// sorted by ID.
 	Push(ctx context.Context, ns, clientID string, muts []protocol.Mutation, ackUpTo int64) (PushOutcome, error)
 
-	// Pull returns changes with version greater than cursor. A response is
-	// cut only at version boundaries once it exceeds roughly budgetBytes, in
-	// which case More is set.
-	Pull(ctx context.Context, ns string, cursor int64, budgetBytes int) (protocol.PullResult, error)
+	// Pull returns changes with version greater than cursor, limited to
+	// collections when non-empty. A response is cut only at version
+	// boundaries once it exceeds roughly budgetBytes, in which case More is
+	// set. Purge records are included only when cursor > 0.
+	Pull(ctx context.Context, ns string, cursor int64, collections []string, budgetBytes int) (protocol.PullResult, error)
 
 	Close() error
+}
+
+// Compactor is implemented by stores that can purge old tombstones.
+type Compactor interface {
+	// Compact purges up to limit documents whose deletion HLC is below
+	// cutoff, replacing them with purge records (see protocol.DocChange),
+	// and returns the namespaces it changed.
+	Compact(ctx context.Context, cutoff string, limit int) (purged int, namespaces []string, err error)
 }

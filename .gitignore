@@ -20,3 +20,5 @@ node_modules/
 # Build outputs of sdk/js/build.mjs
 sdk/js/wasm_exec.js
 examples/todo/gosync/
+*.wasm.br
+*.wasm.gz

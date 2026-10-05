@@ -55,11 +55,50 @@ jobs:
         run: node sdk/js/build.mjs --out examples/todo/gosync
       - name: Install test deps
         working-directory: sdk/js
-        run: npm install --no-save fake-indexeddb@6
-      - name: End-to-end test against a live server
+        run: |
+          npm install --no-save fake-indexeddb@6 playwright@1
+          npx playwright install --with-deps chromium firefox webkit
+      - name: Start server
         run: |
           go build -o gosync-server ./cmd/gosync-server
-          GOSYNC_ADDR=127.0.0.1:8090 GOSYNC_INSECURE_DEV_AUTH=true GOSYNC_STATIC_DIR=examples/todo \
-            GOSYNC_DATABASE_URL=/tmp/e2e.db ./gosync-server &
+          GOSYNC_ADDR=127.0.0.1:8090 GOSYNC_INSECURE_DEV_AUTH=true GOSYNC_STATIC_DIR=examples/todo             GOSYNC_DATABASE_URL=/tmp/e2e.db ./gosync-server &
           for i in $(seq 1 50); do curl -sf http://127.0.0.1:8090/readyz && break; sleep 0.2; done
-          node sdk/js/test/e2e.mjs
+      - name: SDK end-to-end (WASM + IndexedDB, incl. compaction)
+        env:
+          GOSYNC_SERVER_BIN: ./gosync-server
+          GOSYNC_DATABASE_URL: /tmp/e2e.db
+        run: node sdk/js/test/e2e.mjs
+      - name: Real browsers (multi-tab, failover, persistence)
+        run: node sdk/js/test/browser.mjs chromium firefox webkit
+
+  load:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: gosync
+          POSTGRES_PASSWORD: gosync
+          POSTGRES_DB: gosync
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gosync -d gosync"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Two server instances on one PostgreSQL
+        run: |
+          go build -o gosync-server ./cmd/gosync-server
+          go build -o gosync-loadtest ./cmd/gosync-loadtest
+          export GOSYNC_DATABASE_URL=postgres://gosync:gosync@localhost:5432/gosync?sslmode=disable
+          export GOSYNC_INSECURE_DEV_AUTH=true GOSYNC_LOG_LEVEL=warn
+          ./gosync-server migrate
+          GOSYNC_ADDR=127.0.0.1:8081 GOSYNC_METRICS_ADDR=127.0.0.1:9091 ./gosync-server &
+          GOSYNC_ADDR=127.0.0.1:8082 ./gosync-server &
+          for p in 8081 8082; do for i in $(seq 1 50); do curl -sf http://127.0.0.1:$p/readyz && break; sleep 0.2; done; done
+      - name: Load test (devices split across instances; fan-out via LISTEN/NOTIFY)
+        run: |
+          ./gosync-loadtest -url ws://127.0.0.1:8081/sync,ws://127.0.0.1:8082/sync             -users 150 -devices 4 -duration 45s -interval 1s             -metrics http://127.0.0.1:9091/metrics -max-p99 1s -min-delivery 1
