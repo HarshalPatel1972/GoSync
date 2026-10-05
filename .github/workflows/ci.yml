@@ -20,7 +20,7 @@ jobs:
           POSTGRES_DB: gosync_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U gosync"
+          --health-cmd "pg_isready -U gosync -d gosync_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       GOSYNC_TEST_POSTGRES: postgres://gosync:gosync@localhost:5432/gosync_test?sslmode=disable
@@ -34,7 +34,7 @@ jobs:
           go vet ./...
           GOOS=js GOARCH=wasm go vet ./cmd/gosync-wasm/
       - name: Test (SQLite + PostgreSQL, race detector)
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 ./... && go test -count=1 -v -run . ./store/sqlstore | grep -E "^s+--- (PASS|FAIL).*/postgres"
       - name: Build server
         run: go build -o gosync-server ./cmd/gosync-server
 
