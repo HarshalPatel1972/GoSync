@@ -121,6 +121,7 @@ const (
 	connectTimeout = 15 * time.Second
 	minBackoff     = 500 * time.Millisecond
 	maxBackoff     = 30 * time.Second
+	stableSession  = 10 * time.Second
 )
 
 // New opens a client on opts.Store. Call Run to start syncing.
@@ -311,6 +312,7 @@ func (c *Client) Run(ctx context.Context) error {
 	backoff := minBackoff
 	for {
 		c.setStatus(StatusConnecting)
+		started := time.Now()
 		established, err := c.session(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -323,7 +325,10 @@ func (c *Client) Run(ctx context.Context) error {
 				c.emit(Event{Kind: "error", Err: err})
 			}
 		}
-		if established {
+		// Only a session that stayed up resets the backoff; otherwise a
+		// server that accepts and immediately drops us (e.g. an expiring
+		// token) would cause a tight reconnect loop.
+		if established && time.Since(started) > stableSession {
 			backoff = minBackoff
 		}
 		delay := backoff/2 + rand.N(backoff/2+1)
@@ -411,6 +416,7 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 			if err != nil {
 				return true, err
 			}
+			muts = fitPushFrame(muts)
 			if len(muts) > 0 {
 				if err := c.send(ctx, conn, protocol.TypePush, protocol.Push{Mutations: muts}); err != nil {
 					return true, err
@@ -465,6 +471,23 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 			}
 		}
 	}
+}
+
+// fitPushFrame trims a batch to stay under protocol.MaxPushBytes, keeping
+// at least one mutation (each is bounded by MaxMutationBytes). An oversized
+// frame would be refused by the server and retried forever.
+func fitPushFrame(muts []protocol.Mutation) []protocol.Mutation {
+	size := 64 // envelope overhead
+	for i, m := range muts {
+		size += 96 + len(m.Collection) + len(m.Doc) + len(m.HLC)
+		for name, v := range m.Fields {
+			size += len(name) + len(v) + 8
+		}
+		if size > protocol.MaxPushBytes && i > 0 {
+			return muts[:i]
+		}
+	}
+	return muts
 }
 
 func (c *Client) applyRemote(ctx context.Context, res protocol.PullResult, scope string) error {

@@ -74,8 +74,12 @@ func (c *conn) finish(code int, reason string) {
 // closeWith sends a close frame (best effort) and tears the session down.
 func (c *conn) closeWith(code int, reason string) {
 	c.closeOnce.Do(func() {
-		msg := websocket.FormatCloseMessage(code, reason)
-		c.ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+		// 1006 means "the connection died" and must never be sent on the
+		// wire (RFC 6455 §7.4.1); just drop the socket then.
+		if code != websocket.CloseAbnormalClosure {
+			msg := websocket.FormatCloseMessage(code, reason)
+			c.ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+		}
 		close(c.done)
 		c.ws.Close()
 	})

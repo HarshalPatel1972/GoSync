@@ -25,6 +25,8 @@ const (
 	counterDigits = 6
 	// MaxNodeLen bounds the node ID so encoded timestamps stay small.
 	MaxNodeLen = 64
+	// MaxCounter is the largest counter that fits the encoding.
+	MaxCounter = 999_999
 )
 
 // Timestamp is a decoded HLC value.
@@ -125,9 +127,14 @@ func (c *Clock) Now() Timestamp {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	wall := c.now()
-	if wall > c.last.Wall {
+	switch {
+	case wall > c.last.Wall:
 		c.last = Timestamp{Wall: wall, Node: c.node}
-	} else {
+	case c.last.Counter >= MaxCounter:
+		// The counter must stay within its fixed width or encoded order
+		// breaks; borrow the next millisecond instead.
+		c.last = Timestamp{Wall: c.last.Wall + 1, Node: c.node}
+	default:
 		c.last = Timestamp{Wall: c.last.Wall, Counter: c.last.Counter + 1, Node: c.node}
 	}
 	return c.last

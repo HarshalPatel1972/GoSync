@@ -244,6 +244,13 @@ func printMetrics(url string) {
 	defer peak.Unlock()
 	fmt.Printf("server: peak RSS %.0f MiB, peak goroutines %.0f, sessions %.0f, CPU %.1fs\n",
 		peak.rss/(1<<20), peak.goroutines, m["gosync_sessions"], m["process_cpu_seconds_total"])
+	for _, op := range []string{"push", "pull"} {
+		sum := m[`gosync_request_duration_seconds_sum{op="`+op+`"}`]
+		n := m[`gosync_request_duration_seconds_count{op="`+op+`"}`]
+		if n > 0 {
+			fmt.Printf("server %s: %.0f requests, mean %v\n", op, n, time.Duration(sum/n*float64(time.Second)).Round(time.Microsecond*10))
+		}
+	}
 }
 
 func scrape(url string) map[string]float64 {

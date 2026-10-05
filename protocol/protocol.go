@@ -45,8 +45,13 @@ const FieldDeleted = "_deleted"
 // Limits shared by client and server. The server enforces them; the client
 // checks them up front so applications get errors at write time.
 const (
-	MaxMessageBytes     = 1 << 20  // largest frame a client may send
-	MaxValueBytes       = 64 << 10 // largest single field value
+	MaxMessageBytes = 1 << 20  // largest frame a client may send
+	MaxValueBytes   = 64 << 10 // largest single field value
+	// MaxMutationBytes bounds a whole mutation (names + values) so any single
+	// mutation fits in a push frame with room to spare.
+	MaxMutationBytes = 256 << 10
+	// MaxPushBytes is the size clients aim to keep push frames under.
+	MaxPushBytes        = 768 << 10
 	MaxMutationsPerPush = 100
 	MaxFieldsPerDoc     = 100
 	MaxCollectionLen    = 64
@@ -259,9 +264,14 @@ func ValidateMutation(m Mutation) error {
 	if len(m.Fields) == 0 || len(m.Fields) > MaxFieldsPerDoc {
 		return fmt.Errorf("a mutation must set 1-%d fields", MaxFieldsPerDoc)
 	}
+	total := 0
 	for name, v := range m.Fields {
 		if err := ValidateFieldName(name); err != nil {
 			return err
+		}
+		total += len(name) + len(v)
+		if total > MaxMutationBytes {
+			return fmt.Errorf("a mutation may hold at most %d bytes", MaxMutationBytes)
 		}
 		if len(v) > MaxValueBytes {
 			return fmt.Errorf("field %q exceeds %d bytes", name, MaxValueBytes)

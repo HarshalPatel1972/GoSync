@@ -460,3 +460,47 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionCapIncludesHandshakes(t *testing.T) {
+	st, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv, _ := server.New(server.Config{Store: st, Auth: server.InsecureDevAuthenticator(), Logger: quiet, MaxConnections: 2})
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+	url := "ws" + strings.TrimPrefix(hs.URL, "http") + "/sync"
+	// Two sockets that never send hello occupy both slots...
+	for range 2 {
+		ws, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.Close()
+	}
+	// ...so a third is refused instead of piling up.
+	_, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got err=%v resp=%v", err, resp)
+	}
+}
+
+func TestLargeOfflineBacklogSyncs(t *testing.T) {
+	e := newEnv(t, nil)
+	a := e.client("alice")
+	big := strings.Repeat("x", 60<<10)
+	for i := range 32 { // ~2 MB: more than one push frame can carry
+		a.set(t, "files", fmt.Sprintf("f%02d", i), map[string]any{"blob": big})
+	}
+	a.start()
+	b := e.client("alice")
+	b.start()
+	eventually(t, "large backlog delivered", func() bool {
+		docs, _ := b.List(context.Background(), "files")
+		return len(docs) == 32
+	})
+	if errs := a.errors(); len(errs) > 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+}

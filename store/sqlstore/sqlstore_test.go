@@ -295,3 +295,30 @@ func TestPullFiltersCollections(t *testing.T) {
 		})
 	}
 }
+
+func TestCompactionIsNotStarvedByUnpurgeableDocs(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			id := int64(0)
+			push := func(doc, field, value string, wall int64) {
+				id++
+				if _, err := s.Push(ctx, "u1", "A", []protocol.Mutation{mut(id, doc, field, value, ts(wall, "A"))}, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Three docs deleted but with a later field (raw protocol client):
+			// never purgeable. They must not block the purgeable one.
+			for i := range 3 {
+				d := fmt.Sprintf("stuck%d", i)
+				push(d, protocol.FieldDeleted, "true", 100)
+				push(d, "late", "1", 200)
+			}
+			push("free", protocol.FieldDeleted, "true", 100)
+			n, _, err := s.Compact(ctx, ts(1000, ""), 2) // batch smaller than the stuck set
+			if err != nil || n != 1 {
+				t.Fatalf("purged %d (err %v), want the one purgeable doc", n, err)
+			}
+		})
+	}
+}

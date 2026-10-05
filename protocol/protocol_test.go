@@ -32,6 +32,12 @@ func TestValidateMutation(t *testing.T) {
 		"reserved _x":      func(m *Mutation) { m.Fields = map[string]json.RawMessage{"_x": json.RawMessage(`1`)} },
 		"invalid json":     func(m *Mutation) { m.Fields = map[string]json.RawMessage{"a": json.RawMessage(`{`)} },
 		"deleted not bool": func(m *Mutation) { m.Fields = map[string]json.RawMessage{FieldDeleted: json.RawMessage(`1`)} },
+		"mutation too big": func(m *Mutation) {
+			m.Fields = map[string]json.RawMessage{}
+			for i := range 5 {
+				m.Fields[strings.Repeat("f", i+1)] = json.RawMessage(`"` + strings.Repeat("x", MaxValueBytes-10) + `"`)
+			}
+		},
 		"value too big": func(m *Mutation) {
 			m.Fields = map[string]json.RawMessage{"a": json.RawMessage(`"` + strings.Repeat("x", MaxValueBytes) + `"`)}
 		},

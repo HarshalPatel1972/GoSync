@@ -46,9 +46,8 @@ func (b *LocalBroker) Close() error { return nil }
 
 // hub tracks live connections by namespace.
 type hub struct {
-	mu    sync.RWMutex
-	byNS  map[string]map[*conn]struct{}
-	total int
+	mu   sync.RWMutex
+	byNS map[string]map[*conn]struct{}
 }
 
 func newHub() *hub { return &hub{byNS: map[string]map[*conn]struct{}{}} }
@@ -62,7 +61,6 @@ func (h *hub) add(c *conn) {
 		h.byNS[c.principal.Namespace] = set
 	}
 	set[c] = struct{}{}
-	h.total++
 }
 
 func (h *hub) remove(c *conn) {
@@ -76,13 +74,6 @@ func (h *hub) remove(c *conn) {
 	if len(set) == 0 {
 		delete(h.byNS, c.principal.Namespace)
 	}
-	h.total--
-}
-
-func (h *hub) count() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.total
 }
 
 // poke tells every connection in ns except origin to pull; an empty ns pokes

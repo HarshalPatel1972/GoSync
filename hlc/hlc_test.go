@@ -57,3 +57,19 @@ func TestClockObserveOrdersAfterRemote(t *testing.T) {
 		t.Fatalf("%v should be after observed %v", got, remote)
 	}
 }
+
+func TestClockCounterNeverOverflowsEncoding(t *testing.T) {
+	c, _ := NewClock("n", func() int64 { return 100 }) // wall clock stuck
+	c.Observe(Timestamp{Wall: 100, Counter: MaxCounter - 1, Node: "r"})
+	prev := c.Now()
+	for range 5 {
+		next := c.Now()
+		if next.Counter > MaxCounter || next.String() <= prev.String() {
+			t.Fatalf("encoding order broken: %s after %s", next, prev)
+		}
+		if _, err := Parse(next.String()); err != nil {
+			t.Fatal(err)
+		}
+		prev = next
+	}
+}

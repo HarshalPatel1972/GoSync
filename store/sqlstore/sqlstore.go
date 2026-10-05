@@ -681,10 +681,16 @@ func (s *Store) Pull(ctx context.Context, ns string, cursor int64, collections [
 // field rows are removed and replaced by a small purge record. It processes
 // at most limit documents and returns the namespaces it changed.
 func (s *Store) Compact(ctx context.Context, cutoff string, limit int) (purged int, namespaces []string, err error) {
+	// Documents with a field newer than their deletion are never purged
+	// (see compactNamespace); excluding them here keeps them from filling
+	// every batch and starving the rest.
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT ns, coll, doc, hlc FROM gosync_fields
-		WHERE field = '_deleted' AND value = 'true' AND hlc < ?
-		ORDER BY ns LIMIT ?`), cutoff, limit)
+		SELECT f.ns, f.coll, f.doc, f.hlc FROM gosync_fields f
+		WHERE f.field = '_deleted' AND f.value = 'true' AND f.hlc < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM gosync_fields g
+			WHERE g.ns = f.ns AND g.coll = f.coll AND g.doc = f.doc AND g.hlc > f.hlc)
+		LIMIT ?`), cutoff, limit)
 	if err != nil {
 		return 0, nil, err
 	}

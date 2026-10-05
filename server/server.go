@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -50,6 +51,8 @@ type Server struct {
 	hub      *hub
 	upgrader websocket.Upgrader
 	instance string
+
+	live atomic.Int64 // open sockets, authenticated or not
 
 	mu       sync.Mutex
 	closed   bool
@@ -152,10 +155,14 @@ func (s *Server) ServeSync(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.sessions.Done()
 
-	if s.hub.count() >= s.cfg.MaxConnections {
+	// Count every socket, including ones still in the handshake, so clients
+	// that connect and never say hello cannot exhaust the server.
+	if s.live.Add(1) > int64(s.cfg.MaxConnections) {
+		s.live.Add(-1)
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
+	defer s.live.Add(-1)
 	ws, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // Upgrade already wrote an HTTP error
