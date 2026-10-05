@@ -1,16 +1,22 @@
-name: goreleaser
+name: release
 
 on:
   push:
     tags:
       - 'v*'
-
-permissions:
-  contents: write
+  # Publish (or re-publish) the npm package for an existing tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish to npm, e.g. v2.0.0'
+        required: true
 
 jobs:
   goreleaser:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,3 +38,37 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishes sdk/js with npm trusted publishing (OIDC): no tokens or
+  # one-time codes. Configure it once on npmjs.com under the package's
+  # Settings -> Trusted Publisher (GitHub Actions, this repo, release.yml).
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets npm verify this workflow and attach provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Use an npm with trusted publishing support
+        run: npm install -g npm@latest
+      - name: Check package version matches the tag
+        working-directory: sdk/js
+        run: |
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then echo "tag $tag does not match package.json $pkg"; exit 1; fi
+      - name: Publish
+        working-directory: sdk/js
+        run: npm publish --access public # prepublishOnly builds gosync.wasm
