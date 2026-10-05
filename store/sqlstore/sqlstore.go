@@ -350,12 +350,22 @@ func (s *Store) LastMutationID(ctx context.Context, ns, clientID string) (int64,
 // bumpVersion increments a namespace's version. The row lock it takes
 // serialises writers within the namespace, so versions commit in order and a
 // cursor can never skip over a slower concurrent transaction.
+//
+// Versions are at least the current time in microseconds, so they keep
+// increasing even after the database is restored from a backup: otherwise a
+// client whose cursor came from the lost timeline would skip the versions
+// re-issued after the restore. (2^53 µs, the largest exact cursor in
+// JavaScript, is in the year 2255.)
 func (s *Store) bumpVersion(ctx context.Context, tx *sql.Tx, ns string) (int64, error) {
+	greatest := "MAX" // SQLite's scalar max
+	if s.dialect == postgres {
+		greatest = "GREATEST"
+	}
 	var version int64
 	err := s.txQueryRow(ctx, tx, s.db, s.q(`
-		INSERT INTO gosync_spaces (ns, version) VALUES (?, 1)
-		ON CONFLICT (ns) DO UPDATE SET version = gosync_spaces.version + 1
-		RETURNING version`), ns).Scan(&version)
+		INSERT INTO gosync_spaces (ns, version) VALUES (?, ?)
+		ON CONFLICT (ns) DO UPDATE SET version = `+greatest+`(gosync_spaces.version + 1, excluded.version)
+		RETURNING version`), ns, time.Now().UnixMicro()).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("bump version: %w", err)
 	}
@@ -633,6 +643,23 @@ func (s *Store) purgedHLCs(ctx context.Context, tx *sql.Tx, ns string, muts []pr
 		out[k] = at
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) Doc(ctx context.Context, ns, collection, id string) (protocol.DocChange, error) {
+	ch := protocol.DocChange{Collection: collection, Doc: id, Fields: map[string]protocol.FieldValue{}}
+	rows, err := s.rdb.QueryContext(ctx, s.q(`SELECT field, value, hlc FROM gosync_fields WHERE ns = ? AND coll = ? AND doc = ?`), ns, collection, id)
+	if err != nil {
+		return ch, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f, v, t string
+		if err := rows.Scan(&f, &v, &t); err != nil {
+			return ch, err
+		}
+		ch.Fields[f] = protocol.FieldValue{Value: json.RawMessage(v), HLC: t}
+	}
+	return ch, rows.Err()
 }
 
 // collFilter returns " AND coll IN (?, ...)" and its arguments.

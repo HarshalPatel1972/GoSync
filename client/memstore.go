@@ -113,6 +113,17 @@ func (s *MemoryStore) Ack(_ context.Context, upTo int64) error {
 	return nil
 }
 
+func (s *MemoryStore) Revert(_ context.Context, collection, id, hlc string, current map[string]protocol.FieldValue) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.doc(collection, id)
+	RevertFields(d.Fields, hlc, current)
+	if len(d.Fields) == 0 {
+		delete(s.docs[collection], id)
+	}
+	return nil
+}
+
 func (s *MemoryStore) Get(_ context.Context, collection, id string) (StoredDoc, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

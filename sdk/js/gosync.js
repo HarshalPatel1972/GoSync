@@ -149,6 +149,21 @@ function createBridge(db) {
       if (max) await bumpMaxHlc(meta, max);
       await completion(t);
     },
+    async revert(c, d, hlc, currentJSON) {
+      const current = JSON.parse(currentJSON);
+      const t = tx('docs', 'readwrite');
+      const docs = t.objectStore('docs');
+      const doc = await request(docs.get([c, d]));
+      if (doc) {
+        // Same as client.RevertFields in Go.
+        for (const [name, value] of Object.entries(doc.f)) if (value.t === hlc) delete doc.f[name];
+      }
+      const next = doc ?? { c, d, f: {} };
+      merge(next.f, current);
+      if (Object.keys(next.f).length === 0) docs.delete([c, d]);
+      else docs.put(next);
+      await completion(t);
+    },
     async pending(limit) {
       return JSON.stringify(await request(tx('outbox').objectStore('outbox').getAll(null, limit)));
     },
@@ -359,3 +374,6 @@ export async function createClient(options = {}) {
   };
   return api;
 }
+
+// Exposed for the SDK's own tests; not part of the public API.
+export const _internals = { createBridge, openDatabase };

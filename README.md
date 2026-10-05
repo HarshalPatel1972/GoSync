@@ -4,7 +4,7 @@
 
 **Offline-first, real-time sync for web apps. Self-hosted, written in Go.**
 
-[🌐 Website](https://gosync-zero.vercel.app) · [📖 Protocol](./PROTOCOL.md) · [📦 NPM Package](https://www.npmjs.com/package/@harshalpatel2868/gosync-client) · [🎨 Website Repo](https://github.com/HarshalPatel1972/gosync-zero)
+[🌐 Website](https://gosync-zero.vercel.app) · [📖 Protocol](./PROTOCOL.md) · [🛠 Operations](./docs/OPERATIONS.md) · [📦 NPM Package](https://www.npmjs.com/package/@harshalpatel2868/gosync-client) · [🎨 Website Repo](https://github.com/HarshalPatel1972/gosync-zero)
 
 Your app reads and writes a local database in the browser, so it is instant and works
 offline. GoSync syncs those changes to your server and to the user's other devices and
@@ -38,6 +38,11 @@ db.onStatus((s) => console.log(s));              // 'offline' | 'connecting' | '
 - **Multi-tab aware.** One tab holds the connection (Web Locks); the others share the same
   IndexedDB and update instantly over BroadcastChannel.
 - **Scales out.** Run several server instances on PostgreSQL; they coordinate with LISTEN/NOTIFY.
+  Measured: 1,000+ writes/s across 2,000 devices with a p99 under 100 ms ([details](./docs/OPERATIONS.md#capacity-measured)).
+- **Partial sync.** A client can pull only the collections it needs (`collections: ['todos']`).
+- **Stays small.** Deleted documents are compacted after a retention period, and devices that
+  were offline the whole time still converge.
+- **Observable.** Prometheus metrics, pprof, structured logs and health checks.
 - **Same Go code on both ends.** The client engine is Go compiled to WebAssembly and shares the
   protocol and clock packages with the server.
 
@@ -81,12 +86,15 @@ Or `GOSYNC_JWT_SECRET=$(openssl rand -hex 32) docker compose up --build` for a s
 | `GOSYNC_TLS_CERT` / `GOSYNC_TLS_KEY` | Serve `wss://` directly (or terminate TLS at your proxy) |
 | `GOSYNC_STATIC_DIR` | Optionally serve your web app from the same origin |
 | `GOSYNC_LOG_FORMAT` / `GOSYNC_LOG_LEVEL` | `json`/`text`; `debug`…`error` |
+| `GOSYNC_METRICS_ADDR` | Private listener for Prometheus `/metrics` and `/debug/pprof` (off by default) |
+| `GOSYNC_TOMBSTONE_RETENTION` | Compact deleted documents after this long (default `720h`) |
+| `GOSYNC_DB_MAX_CONNS` | PostgreSQL pool size per instance (default 25) |
 
 Endpoints: `GET /sync` (WebSocket), `GET /healthz` (liveness), `GET /readyz` (database reachable).
 
-**Checklist:** serve over HTTPS/WSS, set `GOSYNC_ALLOWED_ORIGINS`, use JWKS or a strong secret with
-issuer and audience checks, back up the database, and serve `gosync.wasm` with brotli or gzip
-(about 4 MB raw, roughly 1 MB compressed) and long-lived caching.
+Before launch, work through the [operations guide](./docs/OPERATIONS.md): deployment checklist,
+scaling, monitoring, backups and upgrades. Commands: `gosync-server migrate` applies schema
+migrations, and `gosync-server compact` runs tombstone compaction once.
 
 ## Data model
 
@@ -94,6 +102,7 @@ issuer and audience checks, back up the database, and serve `gosync.wasm` with b
 - Field values are any JSON. `set` merges the given fields and leaves the others alone; set a field to `null` to clear it.
 - `delete` is a tombstone and is itself last-writer-wins, so a later `set` revives the document.
 - Each user (JWT namespace) has a separate dataset. Use one `dbName` per signed-in user in the browser.
+- Limits: 64 KiB per field value and 256 KiB per write.
 
 ## Using GoSync from Go
 
@@ -124,23 +133,33 @@ an existing Go service and plug in your own `Authenticator` or `store.Store`.
 | `server` | WebSocket server, auth, change fan-out |
 | `store/sqlstore` | SQLite and PostgreSQL storage, Postgres broker |
 | `protocol`, `hlc` | Wire protocol and hybrid logical clock, shared by both ends |
+| `cmd/gosync-loadtest` | Load generator measuring end-to-end propagation latency |
 | `examples/todo` | Demo app |
+| `docs/OPERATIONS.md` | Running GoSync in production |
 
 ## Development
 
 ```bash
-make test                       # Go tests, race detector (set GOSYNC_TEST_POSTGRES to include PostgreSQL)
-make sdk                        # build gosync.wasm + copy the SDK into the demo
-node sdk/js/test/e2e.mjs        # browser SDK end-to-end, against a running demo server on :8090
+make test                     # Go tests, race detector (set GOSYNC_TEST_POSTGRES to include PostgreSQL)
+make sdk                      # build gosync.wasm (+ .br/.gz) and copy the SDK into the demo
+cd sdk/js && npm install && npx playwright install
+npm run test:e2e              # SDK end-to-end (WASM + IndexedDB) against a demo server on :8090
+npm run test:browser          # multi-tab, failover and persistence in Chromium, Firefox and WebKit
 ```
+
+CI runs all of these, plus a load test with two server instances on PostgreSQL.
 
 ## Known limitations
 
 - Last-writer-wins is per field. Concurrent edits to the *same* text field keep one version;
-  collaborative text editing needs a sequence CRDT.
-- Deleted documents keep a small tombstone forever (no compaction yet).
-- Every user's dataset is synced in full to their devices; there are no partial or query-based subscriptions yet.
-- Server-side validation is structural (sizes, names, JSON). Add business rules in a custom server wrapper.
+  collaborative text editing needs a sequence CRDT, which GoSync doesn't provide yet.
+- The browser engine is Go compiled to WebAssembly: about 0.8 MB with brotli, mostly the Go
+  runtime. Load it after first paint (`createClient` is async) and cache it.
+- A device whose clock is more than 5 minutes fast has its writes rejected (reported through
+  `onError`) rather than letting them win every conflict.
+- Server-side checks are structural (sizes, names, JSON) unless you embed the server and set
+  `server.Config.ValidateMutation` for permissions and business rules. A rejected write is
+  undone on the device that made it and reported through `onError`.
 
 ## License
 

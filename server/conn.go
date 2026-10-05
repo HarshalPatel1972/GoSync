@@ -259,6 +259,12 @@ func (c *conn) handlePush(ctx context.Context, data json.RawMessage) error {
 			reject("timestamp is too far in the future; check the device clock")
 			continue
 		}
+		if v := c.s.cfg.ValidateMutation; v != nil {
+			if err := v(ctx, c.principal, m); err != nil {
+				reject(err.Error())
+				continue
+			}
+		}
 		valid = append(valid, m)
 	}
 
@@ -275,6 +281,22 @@ func (c *conn) handlePush(ctx context.Context, data json.RawMessage) error {
 	}
 	if len(rejected) > 0 {
 		c.log.Warn("rejected mutations", "count", len(rejected), "first", rejected[0].Reason)
+		// Send the authoritative state so the client can undo each write.
+		byID := map[int64]protocol.Mutation{}
+		for _, m := range push.Mutations {
+			byID[m.ID] = m
+		}
+		for i, r := range rejected {
+			m := byID[r.ID]
+			if protocol.ValidateCollection(m.Collection) != nil || protocol.ValidateDocID(m.Doc) != nil {
+				continue // malformed target: nothing to look up
+			}
+			cur, err := c.s.cfg.Store.Doc(ctx, c.principal.Namespace, m.Collection, m.Doc)
+			if err != nil {
+				return err
+			}
+			rejected[i].Current = &cur
+		}
 	}
 	return c.send(protocol.TypePushResult, protocol.PushResult{LastMutationID: out.LastMutationID, Rejected: rejected})
 }

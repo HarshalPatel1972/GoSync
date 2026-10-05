@@ -49,6 +49,11 @@ type LocalStore interface {
 	// Ack removes outbox mutations with ID <= upTo.
 	Ack(ctx context.Context, upTo int64) error
 
+	// Revert undoes a rejected local write: it removes the document's fields
+	// stamped with hlc (only that write used it), then merges current, the
+	// server's state. A document left without fields is removed.
+	Revert(ctx context.Context, collection, id, hlc string, current map[string]protocol.FieldValue) error
+
 	Get(ctx context.Context, collection, id string) (StoredDoc, bool, error)
 	List(ctx context.Context, collection string) ([]StoredDoc, error)
 }
@@ -72,6 +77,17 @@ func ApplyChange(dst map[string]protocol.FieldValue, ch protocol.DocChange) {
 		}
 	}
 	MergeFields(dst, ch.Fields)
+}
+
+// RevertFields applies Revert to one document's fields. Must match revert in
+// sdk/js/gosync.js.
+func RevertFields(dst map[string]protocol.FieldValue, hlc string, current map[string]protocol.FieldValue) {
+	for name, f := range dst {
+		if f.HLC == hlc {
+			delete(dst, name)
+		}
+	}
+	MergeFields(dst, current)
 }
 
 // MergeFields applies last-writer-wins: each incoming field replaces the

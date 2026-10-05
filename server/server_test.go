@@ -504,3 +504,55 @@ func TestLargeOfflineBacklogSyncs(t *testing.T) {
 		t.Fatalf("errors: %v", errs)
 	}
 }
+
+func TestValidateMutationHook(t *testing.T) {
+	st, err := sqlstore.Open(context.Background(), filepath.Join(t.TempDir(), "v.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	team := server.AuthenticatorFunc(func(_ context.Context, token string) (server.Principal, error) {
+		return server.Principal{Subject: token, Namespace: "team"}, nil
+	})
+	srv, _ := server.New(server.Config{
+		Store: st, Auth: team, Logger: quiet,
+		ValidateMutation: func(_ context.Context, p server.Principal, m protocol.Mutation) error {
+			if m.Collection == "announcements" && p.Subject != "admin" {
+				return errors.New("announcements are read-only")
+			}
+			return nil
+		},
+	})
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+	e := &env{t: t, url: "ws" + strings.TrimPrefix(hs.URL, "http") + "/sync"}
+
+	admin := e.client("admin")
+	admin.start()
+	admin.set(t, "announcements", "a1", map[string]any{"text": "official"})
+
+	user := e.client("alice")
+	user.start()
+	eventually(t, "user has the announcement", func() bool {
+		return strings.Contains(user.snapshot("announcements"), "official")
+	})
+	user.set(t, "announcements", "a1", map[string]any{"text": "hacked"})
+	user.set(t, "todos", "t1", map[string]any{"ok": true})
+	eventually(t, "rejection reported", func() bool {
+		for _, err := range user.errors() {
+			if strings.Contains(err.Error(), "read-only") {
+				return true
+			}
+		}
+		return false
+	})
+	// The rejected edit is undone on the device that made it...
+	eventually(t, "user's device reverted", func() bool {
+		return user.snapshot("announcements") == admin.snapshot("announcements")
+	})
+	// ...and never reached anyone else; the allowed write did.
+	eventually(t, "allowed write synced", func() bool { return admin.snapshot("todos") != "" })
+	if got := admin.snapshot("announcements"); !strings.Contains(got, "official") {
+		t.Fatalf("rejected write was stored: %s", got)
+	}
+}

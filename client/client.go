@@ -409,6 +409,7 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 
 	needPush, needPull := true, true
 	pushing, pulling := false, false
+	var inflight []protocol.Mutation // the push awaiting its result
 	for {
 		if needPush && !pushing {
 			needPush = false
@@ -421,7 +422,7 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 				if err := c.send(ctx, conn, protocol.TypePush, protocol.Push{Mutations: muts}); err != nil {
 					return true, err
 				}
-				pushing = true
+				pushing, inflight = true, muts
 			}
 		}
 		if needPull && !pulling {
@@ -450,7 +451,9 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 					return true, err
 				}
 				for _, r := range res.Rejected {
-					c.emit(Event{Kind: "error", Err: fmt.Errorf("gosync: server rejected mutation %d: %s", r.ID, r.Reason)})
+					if err := c.revert(ctx, inflight, r); err != nil {
+						return true, err
+					}
 				}
 				pushing, needPush = false, true
 			case protocol.TypePullResult:
@@ -471,6 +474,22 @@ func (c *Client) session(ctx context.Context) (established bool, err error) {
 			}
 		}
 	}
+}
+
+// revert undoes a rejected write locally so the replica matches the server
+// again, and reports the rejection.
+func (c *Client) revert(ctx context.Context, sent []protocol.Mutation, r protocol.Rejection) error {
+	for _, m := range sent {
+		if m.ID != r.ID || r.Current == nil {
+			continue
+		}
+		if err := c.opts.Store.Revert(ctx, m.Collection, m.Doc, m.HLC, r.Current.Fields); err != nil {
+			return err
+		}
+		c.emit(Event{Kind: "change", Collection: m.Collection, IDs: []string{m.Doc}})
+	}
+	c.emit(Event{Kind: "error", Err: fmt.Errorf("gosync: server rejected a write (mutation %d): %s", r.ID, r.Reason)})
+	return nil
 }
 
 // fitPushFrame trims a batch to stay under protocol.MaxPushBytes, keeping

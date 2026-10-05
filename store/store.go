@@ -42,6 +42,9 @@ type Store interface {
 	// set. Purge records are included only when cursor > 0.
 	Pull(ctx context.Context, ns string, cursor int64, collections []string, budgetBytes int) (protocol.PullResult, error)
 
+	// Doc returns the current fields of one document (empty if none).
+	Doc(ctx context.Context, ns, collection, id string) (protocol.DocChange, error)
+
 	Close() error
 }
 

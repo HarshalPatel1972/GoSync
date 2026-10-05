@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/HarshalPatel1972/GoSync/hlc"
+	"github.com/HarshalPatel1972/GoSync/protocol"
 	"github.com/HarshalPatel1972/GoSync/store"
 )
 
@@ -33,6 +34,12 @@ type Config struct {
 	Logger         *slog.Logger
 	// Metrics records Prometheus metrics when non-nil (see NewMetrics).
 	Metrics *Metrics
+	// ValidateMutation, when set, runs for every structurally valid
+	// mutation before it is stored. Returning an error rejects it (the
+	// client receives the message), which is how to enforce permissions
+	// (e.g. read-only collections) and business rules. It must be fast
+	// and must not block: it runs inline on the connection.
+	ValidateMutation func(ctx context.Context, p Principal, m protocol.Mutation) error
 
 	// Tuning; zero values use the defaults below.
 	MaxConnections  int           // default 10000

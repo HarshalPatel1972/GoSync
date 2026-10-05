@@ -67,11 +67,13 @@ flight. The server processes a connection's frames in order. It sends WebSocket 
 ### 4.1 `hello` (client → server, first frame, within 10 s)
 
 ```json
-{ "version": 2, "token": "<JWT>", "clientId": "3f9a1c0d22e4b5a6c7d8e9f0" }
+{ "version": 2, "token": "<JWT>", "clientId": "3f9a1c0d22e4b5a6c7d8e9f0", "collections": ["todos"] }
 ```
 
 `clientId` identifies the replica's outbox: `[A-Za-z0-9_.-]{1,64}`, stable for the lifetime of
-the local store.
+the local store. `collections` (optional, at most 64) limits pulls to those collections; writes
+to any collection are still accepted. A cursor is only valid for the collection set it was
+pulled with, so clients keep one cursor per set.
 
 ### 4.2 `welcome` (server → client)
 
@@ -91,11 +93,14 @@ drops those entries from its outbox, which recovers from a lost `pushResult`.
 ] }
 ```
 
-At most 100 mutations, with IDs strictly increasing. The server, in one transaction per push:
+At most 100 mutations, with IDs strictly increasing. A mutation holds at most 256 KiB of field
+names and values, and clients keep push frames under 768 KiB, so a batch always fits the
+1 MiB frame limit. The server, in one transaction per push:
 
 1. Skips mutations with `id <= lastMutationId` (idempotency).
-2. For each field, stores `(value, t)` only if `t` is greater than the stored HLC.
-3. Tags changed fields with the namespace's new version and records the new `lastMutationId`.
+2. Skips mutations on a compacted document whose HLC is at or below the purge HLC (see 4.5).
+3. For each field, stores `(value, t)` only if `t` is greater than the stored HLC.
+4. Tags changed fields with the namespace's new version and records the new `lastMutationId`.
 
 ### 4.4 `pushResult` (server → client)
 
@@ -118,11 +123,17 @@ Rejected mutations are acknowledged too; they will never apply.
 ] }
 ```
 
-Returns the current register of every field whose version is greater than `cursor`. Responses
+Returns the current register of every field whose version is greater than `cursor` (limited to
+the hello's `collections`, if any). Responses
 are cut only at version boundaries (about 2 MiB each); when `more` is true the client pulls
 again. The client merges changes with the same LWW rule and stores `cursor` in the same
 transaction. If a cursor is ahead of the server (for example after a database restore), the
 server answers as if the cursor were 0.
+
+A change may carry `"purged": "<hlc>"` instead of (or as well as) fields. The server compacted the
+document after a deletion with that HLC. Replicas drop every field whose HLC is at or below it,
+then merge any fields in the change, and remove the document if no fields remain. Purge records
+are sent only to clients with a non-zero cursor, since fresh clients never held the document.
 
 ### 4.6 `poke` (server → client)
 
@@ -147,7 +158,9 @@ and the client that caused a change is not poked.
 
 Each namespace has a monotonically increasing version. A push increments it while holding the
 namespace's row lock, so versions commit in order and a cursor can never skip a concurrent
-transaction. Each field row stores the version that last changed it. A pull reads the
+transaction. A version is `max(previous + 1, current time in µs)`, so versions keep increasing
+even after the database is restored from a backup, and cursors issued before a restore never
+skip writes made after it. Clients must treat cursors as opaque integers below 2^53. Each field row stores the version that last changed it. A pull reads the
 namespace version and the changed rows in one snapshot.
 
 ## 6. Client behaviour
@@ -156,8 +169,8 @@ namespace version and the changed rows in one snapshot.
   local transaction, then signal the sync loop.
 - **Sync loop:** connect → `hello` → `welcome` → ack the outbox up to `lastMutationId` → push
   pending mutations in batches and pull from the stored cursor → pull again on every `poke`.
-- **Reconnect:** exponential backoff with jitter (0.5 s to 30 s), reset after a successful
-  handshake, and skipped when the browser reports it is back online.
+- **Reconnect:** exponential backoff with jitter (0.5 s to 30 s), reset only after a session
+  stays up for 10 s, and skipped when the browser reports it is back online.
 - **Browsers:** one tab per database holds the connection (Web Locks API). Other tabs write
   to the shared IndexedDB outbox and are notified over BroadcastChannel.
 

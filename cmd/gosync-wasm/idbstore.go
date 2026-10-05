@@ -137,6 +137,19 @@ func (d bridgeDoc) toClient() client.StoredDoc {
 	return client.StoredDoc{Collection: d.C, ID: d.D, Fields: f}
 }
 
+func (s idbStore) Revert(ctx context.Context, collection, id, hlc string, current map[string]protocol.FieldValue) error {
+	f := make(map[string]bridgeField, len(current))
+	for k, v := range current {
+		f[k] = bridgeField{V: string(v.Value), T: v.HLC}
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	_, err = s.call(ctx, "revert", collection, id, hlc, string(b))
+	return err
+}
+
 func (s idbStore) Get(ctx context.Context, collection, id string) (client.StoredDoc, bool, error) {
 	v, err := s.call(ctx, "get", collection, id)
 	if err != nil || v.IsNull() || v.IsUndefined() {

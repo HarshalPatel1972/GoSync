@@ -109,10 +109,14 @@ type PushResult struct {
 }
 
 // Rejection reports a mutation the server refused. It is still acknowledged
-// (it will never apply), so clients must drop it from their outbox.
+// (it will never apply), so clients must drop it from their outbox. Current
+// is the server's state of the document, so the client can undo the
+// rejected write locally: drop fields carrying the mutation's HLC, then merge
+// Current.
 type Rejection struct {
-	ID     int64  `json:"id"`
-	Reason string `json:"reason"`
+	ID      int64      `json:"id"`
+	Reason  string     `json:"reason"`
+	Current *DocChange `json:"current,omitempty"`
 }
 
 // Pull asks for every change after Cursor.

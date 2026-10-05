@@ -322,3 +322,48 @@ func TestCompactionIsNotStarvedByUnpurgeableDocs(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreFromBackupDoesNotStrandCursors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.db")
+	s, err := Open(ctx, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	push := func(s *Store, id int64, doc string) {
+		t.Helper()
+		if _, err := s.Push(ctx, "u1", "A", []protocol.Mutation{mut(id, doc, "v", "1", ts(id, "A"))}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	push(s, 1, "before-backup")
+	if _, err := s.db.Exec(`VACUUM INTO '` + filepath.ToSlash(filepath.Join(dir, "backup.db")) + `'`); err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(2); i <= 5; i++ {
+		push(s, i, fmt.Sprintf("lost-%d", i))
+	}
+	_, deviceCursor := pullAll(t, s, "u1", 0) // a device saw the lost writes
+	s.Close()
+
+	restored, err := Open(ctx, filepath.Join(dir, "backup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	// Enough post-restore writes to carry the version past the device's
+	// stale cursor; every one of them must still reach the device.
+	for i := int64(1); i <= 8; i++ {
+		m := mut(i, fmt.Sprintf("after-restore-%d", i), "v", "2", ts(100+i, "B"))
+		if _, err := restored.Push(ctx, "u1", "B", []protocol.Mutation{m}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	docs, _ := pullAll(t, restored, "u1", deviceCursor)
+	for i := 1; i <= 8; i++ {
+		if docs[fmt.Sprintf("after-restore-%d", i)] == nil {
+			t.Fatalf("device with a pre-restore cursor missed post-restore write %d: %v", i, docs)
+		}
+	}
+}
