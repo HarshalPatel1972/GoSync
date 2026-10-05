@@ -34,7 +34,10 @@ jobs:
           go vet ./...
           GOOS=js GOARCH=wasm go vet ./cmd/gosync-wasm/
       - name: Test (SQLite + PostgreSQL, race detector)
-        run: go test -race -count=1 ./... && go test -count=1 -v -run . ./store/sqlstore | grep -E "^s+--- (PASS|FAIL).*/postgres"
+        run: |
+          go test -race -count=1 ./...
+          # Show that the PostgreSQL variants ran (fails if none did).
+          go test -count=1 -v ./store/sqlstore | grep -E -- "--- (PASS|FAIL): .*/postgres"
       - name: Build server
         run: go build -o gosync-server ./cmd/gosync-server
 
