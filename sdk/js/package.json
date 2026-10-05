@@ -1,15 +1,34 @@
 {
-  "name": "js",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "@harshalpatel2868/gosync-client",
+  "version": "2.0.0",
+  "description": "Offline-first, real-time sync for the browser, powered by a Go/WebAssembly engine.",
+  "type": "module",
+  "main": "./gosync.js",
+  "module": "./gosync.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./gosync.js"
+    },
+    "./gosync.wasm": "./gosync.wasm"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "idb-keyval": "^6.2.2"
-  }
+  "files": [
+    "gosync.js",
+    "index.d.ts",
+    "gosync.wasm",
+    "wasm_exec.js"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "node build.mjs"
+  },
+  "keywords": ["offline-first", "local-first", "sync", "indexeddb", "websocket", "crdt", "wasm", "go"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HarshalPatel1972/GoSync.git",
+    "directory": "sdk/js"
+  },
+  "license": "MIT",
+  "sideEffects": false
 }

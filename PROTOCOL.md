@@ -1,399 +1,169 @@
 # GoSync Protocol Specification
 
-**Version:** 1.0  
+**Version:** 2  
 **Status:** Stable  
-**Last Updated:** December 2024
+**Last Updated:** October 2026
 
----
+Version 2 replaces the v1 snapshot/hash protocol, which exchanged the full dataset on every
+mismatch and overwrote newer data with older data. The two versions are not compatible.
 
-## 1. Abstract
+## 1. Overview
 
-GoSync is an offline-first synchronization protocol designed for applications that need to work seamlessly both online and offline. It synchronizes state between a browser-based client (IndexedDB) and a server-side database (SQLite/PostgreSQL) using cryptographic hashing for efficient change detection.
+GoSync replicates a set of JSON documents between a server and many clients. Clients write to
+a local store first and sync opportunistically. The design follows the push/pull/poke model
+used by modern sync engines:
 
----
+- **Push**: a client uploads its queued local writes (*mutations*).
+- **Pull**: a client downloads everything that changed since its *cursor*.
+- **Poke**: the server tells connected clients that new data exists, so they pull.
 
-## 2. Architecture
+Conflicts are resolved by a per-field last-writer-wins (LWW) rule over hybrid logical clocks.
+That rule is commutative, associative and idempotent, so all replicas converge regardless of
+delivery order or duplication.
 
-### 2.1 Topology
-**Client-Server (Star Topology)**
+## 2. Data model
 
-```
-        ┌─────────┐
-        │ Server  │
-        │ (SQLite)│
-        └────┬────┘
-             │
-    ┌────────┼────────┐
-    │        │        │
-┌───▼──┐ ┌───▼──┐ ┌───▼──┐
-│Client│ │Client│ │Client│
-│ (IDB)│ │ (IDB)│ │ (IDB)│
-└──────┘ └──────┘ └──────┘
-```
+| Concept | Description |
+|---|---|
+| Namespace | Isolated dataset, chosen by the server from the authenticated token (default: JWT `sub`). Clients never name it. |
+| Collection | `[A-Za-z0-9_.-]{1,64}` |
+| Document ID | 1-128 bytes of UTF-8, no NUL |
+| Field | Name of 1-64 bytes. `id` and names starting with `_` are reserved, except `_deleted`. |
+| Value | Any JSON value, at most 64 KiB |
+| Register | `(value, hlc)` per field. The value with the greater HLC wins. |
 
-All clients connect to a central server. The server acts as the authoritative sync point. Clients do not communicate directly with each other.
+A document is deleted when its `_deleted` register holds `true`. Writes through the client API
+set `_deleted: false`, so a write made after a delete revives the document.
 
-### 2.2 Transport Layer
-| Property | Value |
-|----------|-------|
-| Protocol | WebSocket (RFC 6455) |
-| Default Port | 8080 |
-| Connection | Persistent, full-duplex |
-| Reconnection | Client-initiated with exponential backoff (recommended) |
+### 2.1 Hybrid logical clock
 
-### 2.3 Serialization
-| Property | Value |
-|----------|-------|
-| Format | JSON (UTF-8 encoded) |
-| Framing | WebSocket text frames |
-| Schema | Implicit (no external schema required) |
-
----
-
-## 3. Data Model
-
-### 3.1 The `Item` Entity
-
-All syncable data is represented as an `Item`:
-
-| Field | Type | Size | Description |
-|-------|------|------|-------------|
-| `id` | String | Variable | Unique identifier. Default: Unix nanosecond timestamp. |
-| `content` | String | Variable | Application payload (the actual data). |
-| `is_deleted` | Boolean | 1 byte | Tombstone flag. `true` = soft-deleted. |
-| `updated_at` | Int64 | 8 bytes | Unix timestamp in seconds. |
-
-### 3.2 Item Hash Calculation
-
-Each item produces a deterministic hash for change detection:
+An HLC timestamp is `(wall_ms, counter, node)`, encoded as
 
 ```
-Hash = SHA-256( id + ":" + content + ":" + is_deleted + ":" + updated_at )
+%015d-%06d-%s      e.g. 001759683000123-000002-3f9a1c.ab12
 ```
 
-**Example:**
-```
-Input:  "1703961600000:Buy milk:false:1703961600"
-Output: "a3f2b8c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
-```
+The fixed-width encoding makes byte order equal timestamp order, so stores compare strings.
+`node` is the client ID (plus a per-tab suffix in browsers), 1-64 printable ASCII characters,
+and breaks ties. A clock never goes backwards, and after observing a remote timestamp it
+always issues later ones. Clients estimate the server clock offset during the handshake to
+limit skew, and the server rejects mutations more than 5 minutes in its future.
 
-### 3.3 Root Hash (State Hash)
+## 3. Transport
 
-The Root Hash represents the entire dataset state:
-
-```go
-func GenerateRootHash(items []Item) string {
-    // 1. Sort items by ID for deterministic ordering
-    sort.Slice(items, func(i, j int) bool {
-        return items[i].ID < items[j].ID
-    })
-    
-    // 2. Concatenate all individual hashes
-    var combined string
-    for _, item := range items {
-        combined += item.CalculateHash()
-    }
-    
-    // 3. Return hash of combined string
-    return SHA256(combined)
-}
-```
-
-**Property:** If any single item differs (added, modified, deleted), the Root Hash will differ.
-
----
-
-## 4. Message Protocol
-
-### 4.1 Message Envelope
-
-All messages follow this structure:
+A WebSocket at `GET /sync`, carrying UTF-8 JSON text frames:
 
 ```json
-{
-  "type": "<MESSAGE_TYPE>",
-  "payload": "<JSON_STRING>"
-}
+{ "type": "<message type>", "data": { ... } }
 ```
 
-### 4.2 Message Types
+Clients may send frames of at most 1 MiB and should keep at most one push and one pull in
+flight. The server processes a connection's frames in order. It sends WebSocket pings every
+25 s, and a peer silent for about 60 s is disconnected. Browsers must connect from an allowed
+`Origin`.
 
-| Code | Type | Direction | Description |
-|------|------|-----------|-------------|
-| `0x01` | `HASH_CHECK` | Bidirectional | State comparison request/response |
-| `0x02` | `REQUEST_SNAPSHOT` | Bidirectional | Request full dataset from peer |
-| `0x03` | `SNAPSHOT_DATA` | Bidirectional | Full dataset payload |
+## 4. Messages
 
-### 4.3 Message Payloads
+### 4.1 `hello` (client → server, first frame, within 10 s)
 
-#### HASH_CHECK (0x01)
 ```json
-{
-  "type": "HASH_CHECK",
-  "payload": "{\"root_hash\":\"<SHA256>\",\"count\":<INT>}"
-}
+{ "version": 2, "token": "<JWT>", "clientId": "3f9a1c0d22e4b5a6c7d8e9f0" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `root_hash` | String (64 hex chars) | SHA-256 of entire dataset |
-| `count` | Integer | Number of items in dataset |
+`clientId` identifies the replica's outbox: `[A-Za-z0-9_.-]{1,64}`, stable for the lifetime of
+the local store.
 
-#### REQUEST_SNAPSHOT (0x02)
+### 4.2 `welcome` (server → client)
+
 ```json
-{
-  "type": "REQUEST_SNAPSHOT",
-  "payload": ""
-}
+{ "serverTime": 1759683000123, "lastMutationId": 41 }
 ```
-No payload. Simply requests the peer to send all items.
 
-#### SNAPSHOT_DATA (0x03)
+`lastMutationId` is the highest mutation ID the server has applied for this client. The client
+drops those entries from its outbox, which recovers from a lost `pushResult`.
+
+### 4.3 `push` (client → server)
+
 ```json
-{
-  "type": "SNAPSHOT_DATA",
-  "payload": "{\"items\":[<ITEM>, <ITEM>, ...]}"
-}
+{ "mutations": [
+  { "id": 42, "c": "todos", "d": "t1", "t": "001759683000123-000000-3f9a1c.ab12",
+    "f": { "title": "Buy milk", "done": false, "_deleted": false } }
+] }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `items` | Array<Item> | Complete list of all items |
+At most 100 mutations, with IDs strictly increasing. The server, in one transaction per push:
 
----
+1. Skips mutations with `id <= lastMutationId` (idempotency).
+2. For each field, stores `(value, t)` only if `t` is greater than the stored HLC.
+3. Tags changed fields with the namespace's new version and records the new `lastMutationId`.
 
-## 5. Synchronization Flow
+### 4.4 `pushResult` (server → client)
 
-### 5.1 Initial Handshake
-
-```
-┌────────┐                                    ┌────────┐
-│ Client │                                    │ Server │
-└───┬────┘                                    └───┬────┘
-    │                                             │
-    │ ──────── [1] HASH_CHECK ──────────────────▶ │
-    │          {root_hash: "abc...", count: 5}    │
-    │                                             │
-    │          [Server compares hashes]           │
-    │                                             │
-    │ ◀─────── [2] REQUEST_SNAPSHOT ───────────── │  (if hashes differ)
-    │                                             │
-    │ ──────── [3] SNAPSHOT_DATA ───────────────▶ │
-    │          {items: [...]}                     │
-    │                                             │
-    │          [Server saves, recalculates hash]  │
-    │                                             │
-    │ ◀─────── [4] HASH_CHECK ──────────────────── │
-    │          {root_hash: "abc...", count: 5}    │
-    │                                             │
-    │          [Client compares: MATCH]           │
-    │                                             │
-    │              ✓ SYNCHRONIZED                 │
-    └─────────────────────────────────────────────┘
-```
-
-### 5.2 Bidirectional Sync
-
-The protocol supports healing in both directions:
-
-| Scenario | Flow |
-|----------|------|
-| Server is behind | Server requests snapshot from Client |
-| Client is behind | Client requests snapshot from Server |
-| Both in sync | No data exchanged after HASH_CHECK |
-
-### 5.3 Change Propagation
-
-When a client adds/modifies an item:
-
-1. Item is saved to local IndexedDB immediately
-2. Client sends `HASH_CHECK` to server
-3. If mismatch, snapshot exchange occurs
-4. Both sides end up synchronized
-
----
-
-## 6. Conflict Resolution
-
-### 6.1 Strategy: Snapshot-Based Overwrite
-
-**Current Implementation:** When a snapshot is received, all items are saved/overwritten. The side that sends its data last "wins."
-
-### 6.2 Tie-Breaking
-
-In the current implementation, conflicts are resolved by:
-1. The party receiving the snapshot overwrites its local state
-2. If both parties send simultaneously (race condition), the last write persists
-
-### 6.3 Consistency Guarantee
-
-| Property | Value |
-|----------|-------|
-| Model | Eventual Consistency |
-| Guarantee | All connected clients will converge to the same state |
-| Latency | Typically < 100ms on stable connections |
-
-### 6.4 Future: Per-Item LWW
-
-Planned improvement: Compare `updated_at` timestamps per-item before overwriting:
-```go
-if incoming.UpdatedAt > existing.UpdatedAt {
-    save(incoming)
-}
-```
-
----
-
-## 7. Error Handling
-
-### 7.1 Error Conditions
-
-| Condition | Behavior |
-|-----------|----------|
-| WebSocket disconnect | Client should reconnect and resend HASH_CHECK |
-| Malformed JSON | Message is logged and ignored |
-| Unknown message type | Message is logged and ignored |
-| Database write failure | Error logged, sync continues with other items |
-
-### 7.2 Recovery
-
-| Scenario | Recovery Strategy |
-|----------|-------------------|
-| Client crashes mid-sync | On restart, full HASH_CHECK restarts sync |
-| Server crashes mid-sync | Client retries on reconnect |
-| Partial snapshot received | WebSocket framing ensures complete messages |
-
-### 7.3 Idempotency
-
-All operations are idempotent:
-- Receiving the same item twice results in an overwrite (no duplicates)
-- Receiving the same HASH_CHECK twice triggers the same comparison
-
----
-
-## 8. Offline Behavior
-
-### 8.1 Write Path (Offline)
-
-```
-User Action ──▶ Save to IndexedDB ──▶ Done (Instant)
-                     │
-                     └──▶ [No network request if offline]
-```
-
-### 8.2 Read Path (Offline)
-
-```
-User Request ──▶ Read from IndexedDB ──▶ Return Data (Instant)
-```
-
-### 8.3 Reconnection
-
-```
-WebSocket connects ──▶ onopen fires ──▶ Client sends HASH_CHECK
-                                              │
-                                              ▼
-                                     Snapshot exchange if needed
-```
-
----
-
-## 9. Security Considerations
-
-### 9.1 Current Implementation
-
-| Aspect | Status |
-|--------|--------|
-| Transport Encryption | ❌ Not implemented (uses `ws://`) |
-| Authentication | ❌ Not implemented |
-| Authorization | ❌ Not implemented |
-
-### 9.2 Recommendations for Production
-
-| Aspect | Recommendation |
-|--------|----------------|
-| Transport | Use `wss://` (WebSocket Secure) with TLS |
-| Authentication | JWT tokens in WebSocket URL or first message |
-| Authorization | Validate user ownership of items before sync |
-
----
-
-## 10. Persistence Layer
-
-### 10.1 Client (Browser)
-
-| Property | Value |
-|----------|-------|
-| Storage Engine | IndexedDB |
-| Library | `idb-keyval` (via JS bridge) |
-| Database Name | `keyval-store` (default) |
-
-### 10.2 Server
-
-| Property | Value |
-|----------|-------|
-| Storage Engine | SQLite (default) or PostgreSQL |
-| ORM | GORM |
-| File | `server.db` (SQLite) |
-
----
-
-## 11. Implementation Notes
-
-### 11.1 Go/WASM Considerations
-
-The client runs as Go compiled to WebAssembly. Key adaptations:
-- JavaScript bridge for IndexedDB access
-- Promise-to-channel adapter for async operations
-- Goroutine-based message handling to prevent deadlocks
-
-### 11.2 Why Not Full Merkle Tree Traversal?
-
-The current implementation uses Root Hash comparison + Full Snapshot exchange instead of tree traversal because:
-1. Simpler implementation
-2. Sufficient for datasets < 10,000 items
-3. Guaranteed correctness
-
-Full Merkle Tree traversal (O(log n) sync) is planned for v2.
-
----
-
-## 12. Wire Format Examples
-
-### Complete Sync Session
-
-**Step 1: Client sends HASH_CHECK**
 ```json
-{"type":"HASH_CHECK","payload":"{\"root_hash\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"count\":0}"}
+{ "lastMutationId": 42, "rejected": [ { "id": 40, "reason": "timestamp is too far in the future" } ] }
 ```
 
-**Step 2: Server requests snapshot (hashes differ)**
+Every mutation up to `lastMutationId` is acknowledged and the client removes it from the outbox.
+Rejected mutations are acknowledged too; they will never apply.
+
+### 4.5 `pull` (client → server) and `pullResult` (server → client)
+
 ```json
-{"type":"REQUEST_SNAPSHOT","payload":""}
+{ "cursor": 17 }
 ```
 
-**Step 3: Client sends all items**
 ```json
-{"type":"SNAPSHOT_DATA","payload":"{\"items\":[{\"id\":\"1703961600000\",\"content\":\"Buy milk\",\"is_deleted\":false,\"updated_at\":1703961600}]}"}
+{ "cursor": 19, "more": false, "changes": [
+  { "c": "todos", "d": "t1", "f": { "done": { "v": true, "t": "001759683000456-000000-77aa01" } } }
+] }
 ```
 
-**Step 4: Server confirms sync**
+Returns the current register of every field whose version is greater than `cursor`. Responses
+are cut only at version boundaries (about 2 MiB each); when `more` is true the client pulls
+again. The client merges changes with the same LWW rule and stores `cursor` in the same
+transaction. If a cursor is ahead of the server (for example after a database restore), the
+server answers as if the cursor were 0.
+
+### 4.6 `poke` (server → client)
+
+No payload. Something changed in the namespace and the client should pull. Pokes coalesce,
+and the client that caused a change is not poked.
+
+### 4.7 `error` (server → client)
+
 ```json
-{"type":"HASH_CHECK","payload":"{\"root_hash\":\"a1b2c3d4e5f6...\",\"count\":1}"}
+{ "code": "unauthorized", "message": "invalid or expired token", "fatal": true }
 ```
 
----
+| Code | Meaning |
+|---|---|
+| `unauthorized` | Bad or expired token. Also sent when a token expires mid-session; reconnect with a fresh one. |
+| `bad_request` | Protocol violation; the connection closes. |
+| `rate_limited` | Too many frames (default 50/s, burst 100). |
+| `unsupported_version` | Wrong `hello.version`. |
+| `internal` | Server error; the client reconnects with backoff. |
 
-## Appendix A: Glossary
+## 5. Server versioning and correctness
 
-| Term | Definition |
-|------|------------|
-| Root Hash | SHA-256 hash representing entire dataset state |
-| Snapshot | Complete list of all items in the dataset |
-| Tombstone | Soft-deleted item (is_deleted = true) |
-| WASM | WebAssembly - allows Go to run in browsers |
-| IDB | IndexedDB - browser-side database |
+Each namespace has a monotonically increasing version. A push increments it while holding the
+namespace's row lock, so versions commit in order and a cursor can never skip a concurrent
+transaction. Each field row stores the version that last changed it. A pull reads the
+namespace version and the changed rows in one snapshot.
 
----
+## 6. Client behaviour
 
-*End of Protocol Specification*
+- **Writes:** stamp a new HLC, merge into the local document and append to the outbox in one
+  local transaction, then signal the sync loop.
+- **Sync loop:** connect → `hello` → `welcome` → ack the outbox up to `lastMutationId` → push
+  pending mutations in batches and pull from the stored cursor → pull again on every `poke`.
+- **Reconnect:** exponential backoff with jitter (0.5 s to 30 s), reset after a successful
+  handshake, and skipped when the browser reports it is back online.
+- **Browsers:** one tab per database holds the connection (Web Locks API). Other tabs write
+  to the shared IndexedDB outbox and are notified over BroadcastChannel.
+
+## 7. Security
+
+- Authentication is by bearer token in `hello` (never in the URL, which ends up in logs).
+- All data access is scoped to the namespace derived from the verified token.
+- Browser origins are checked; frame, value, batch and rate limits bound resource use.
+- Run behind TLS (`wss://`).
