@@ -1,13 +1,33 @@
-version: '3.8'
+# Production-style stack: GoSync server on PostgreSQL.
+#   GOSYNC_JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
+# Scale out with `docker compose up --scale gosync=3` behind a load balancer;
+# instances coordinate through PostgreSQL LISTEN/NOTIFY.
 services:
-  gosync_db:
-    image: postgres:15
-    container_name: gosync_db
-    ports:
-      - "5432:5432"
+  postgres:
+    image: postgres:17
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: gosync
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gosync}
       POSTGRES_DB: gosync
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gosync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  gosync:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOSYNC_DATABASE_URL: postgres://gosync:${POSTGRES_PASSWORD:-gosync}@postgres:5432/gosync?sslmode=disable
+      GOSYNC_JWT_SECRET: ${GOSYNC_JWT_SECRET:?set GOSYNC_JWT_SECRET (at least 32 bytes)}
+      GOSYNC_ALLOWED_ORIGINS: ${GOSYNC_ALLOWED_ORIGINS:-}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoSync Todo</title>
+  <style>
+    :root { --bg: #f7f7f8; --card: #fff; --text: #1b1b1f; --muted: #6b6b76; --line: #e4e4e8; --accent: #2f6fed; --ok: #1a7f37; --warn: #b26b00; --bad: #c62828; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #111114; --card: #1b1b20; --text: #ececf1; --muted: #9a9aa6; --line: #2c2c33; --accent: #6f9bff; --ok: #4ac26b; --warn: #e3a33b; --bad: #ff6b6b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 560px; margin: 0 auto; padding: 32px 16px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+    h1 { font-size: 1.4rem; margin: 0; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+    .online .dot { background: var(--ok); } .connecting .dot { background: var(--warn); }
+    form { display: flex; gap: 8px; margin-bottom: 16px; }
+    input[type=text] { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--muted); padding: 4px 8px; }
+    ul { list-style: none; padding: 0; margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); }
+    li:first-child { border-top: 0; }
+    li span { flex: 1; overflow-wrap: anywhere; }
+    li.done span { text-decoration: line-through; color: var(--muted); }
+    .empty { padding: 16px; color: var(--muted); text-align: center; }
+    .hint { color: var(--muted); font-size: .85rem; margin-top: 16px; }
+    .user { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; color: var(--muted); font-size: .9rem; }
+    .user input { flex: 0 1 180px; padding: 6px 10px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>GoSync Todo</h1>
+    <span id="status" class="pill"><span class="dot"></span><span id="status-text">starting…</span></span>
+  </header>
+
+  <form class="user" id="user-form">
+    <label for="user">Signed in as</label>
+    <input type="text" id="user" autocomplete="off">
+    <button class="ghost" type="submit">Switch</button>
+  </form>
+
+  <form id="add-form">
+    <input type="text" id="title" placeholder="What needs doing?" autocomplete="off" maxlength="500" required>
+    <button type="submit">Add</button>
+  </form>
+
+  <ul id="list"><li class="empty">Loading…</li></ul>
+
+  <p class="hint">
+    Try it: open this page in a second tab or browser, stop the server, keep editing,
+    then restart it. Every replica converges. Different users never see each other's todos.
+  </p>
+</main>
+
+<script type="module">
+  import { createClient } from './gosync/gosync.js';
+
+  // DEMO AUTH: the server runs with GOSYNC_INSECURE_DEV_AUTH, so the token is
+  // just a user name. In production, return a JWT from your auth provider.
+  const params = new URLSearchParams(location.search);
+  const user = params.get('user') || 'demo';
+  document.getElementById('user').value = user;
+  document.getElementById('user-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const next = document.getElementById('user').value.trim();
+    if (next) location.search = '?user=' + encodeURIComponent(next);
+  });
+
+  const wsUrl = new URL('/sync', location.href);
+  wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+  const db = await createClient({
+    url: wsUrl,
+    getToken: () => user,
+    dbName: 'gosync-demo-' + user, // one local database per user
+  });
+
+  const statusEl = document.getElementById('status');
+  db.onStatus((s) => {
+    statusEl.className = 'pill ' + s;
+    document.getElementById('status-text').textContent = s;
+  });
+  db.onError((err) => console.warn('sync error:', err.message));
+
+  const list = document.getElementById('list');
+  db.watch('todos', (todos) => {
+    todos.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    list.replaceChildren();
+    if (todos.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'Nothing to do.';
+      list.append(li);
+      return;
+    }
+    for (const todo of todos) {
+      const li = document.createElement('li');
+      li.className = todo.done ? 'done' : '';
+
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = !!todo.done;
+      box.addEventListener('change', () => db.set('todos', todo.id, { done: box.checked }));
+
+      const text = document.createElement('span');
+      text.textContent = todo.title; // never innerHTML: titles are user input
+
+      const del = document.createElement('button');
+      del.className = 'ghost';
+      del.textContent = '✕';
+      del.setAttribute('aria-label', 'Delete');
+      del.addEventListener('click', () => db.delete('todos', todo.id));
+
+      li.append(box, text, del);
+      list.append(li);
+    }
+  });
+
+  document.getElementById('add-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('title');
+    const title = input.value.trim();
+    if (!title) return;
+    input.value = '';
+    await db.set('todos', crypto.randomUUID(), { title, done: false, createdAt: Date.now() });
+  });
+</script>
+</body>
+</html>

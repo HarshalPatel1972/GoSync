@@ -4,10 +4,15 @@ dist: build
 before:
   hooks:
     - go mod tidy
+    - node sdk/js/build.mjs
 builds:
   - id: server
-    main: ./cmd/server
-    binary: gosync_server
+    main: ./cmd/gosync-server
+    binary: gosync-server
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
     env:
       - CGO_ENABLED=0
     goos:
@@ -21,17 +26,24 @@ builds:
       - goos: windows
         goarch: arm64
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
+release:
+  extra_files:
+    - glob: sdk/js/gosync.wasm
+    - glob: sdk/js/wasm_exec.js
+    - glob: sdk/js/gosync.js
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 changelog:
   sort: asc
   filters:
